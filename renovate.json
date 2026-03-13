@@ -1,0 +1,22 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "nix": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "matchManagers": ["nix"],
+      "matchPackageNames": ["nixpkgs"],
+      "schedule": ["before 6am on monday"],
+      "commitMessageExtra": "({{{newVersion}}})"
+    },
+    {
+      "matchManagers": ["nix"],
+      "matchPackageNames": ["microvm"],
+      "schedule": ["before 6am on monday"]
+    }
+  ]
+}
