@@ -10,4 +10,4 @@ vm:
 	nix build $(NIX_FLAGS) .#vm
 
 vm.run: vm
-	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
+	WORK_DIR=$(WORK_DIR) CLAUDE_HOME=$(CLAUDE_HOME) ./result/bin/microvm-run

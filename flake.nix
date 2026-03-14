@@ -42,6 +42,12 @@
                   mountPoint = "/work";
                   proto = "virtiofs";
                 }
+                {
+                  tag = "claude-home";
+                  source = "/tmp/claude-vm-home";
+                  mountPoint = "/home/claude";
+                  proto = "virtiofs";
+                }
               ];
 
               qemu.extraArgs = [
@@ -83,13 +89,16 @@
               git
               openssh
               cacert
+              direnv
             ];
 
             environment.variables = {
               SSL_CERT_FILE = "/etc/ssl/certs/ca-bundle.crt";
+              DISABLE_AUTOUPDATER = "1";
             };
 
             programs.bash.interactiveShellInit = ''
+              eval "$(direnv hook bash)"
               git config --global --add safe.directory /work 2>/dev/null || true
               cd /work 2>/dev/null || true
               claude; sudo poweroff
@@ -125,6 +134,8 @@
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         ID=$(echo -n "$WORK" | sha256sum | cut -c1-8)
+
+        # --- Work share (virtiofsd) ---
         SOCK="$RUNTIME/claude-vm-virtiofs-$ID.sock"
         UNIT="claude-vm-virtiofsd-$ID"
         STATE="$RUNTIME/claude-vm-virtiofsd-$ID.workdir"
@@ -167,10 +178,69 @@
           [ -S "$SOCK" ] || { echo "error: virtiofsd socket did not appear"; exit 1; }
         fi
 
+        # --- Claude home share (virtiofsd) ---
+        CLAUDE_SOCK="$RUNTIME/claude-vm-virtiofs-$ID-claude-home.sock"
+        CLAUDE_UNIT="claude-vm-virtiofsd-$ID-claude-home"
+        CLAUDE_STATE="$RUNTIME/claude-vm-virtiofsd-$ID-claude-home.dir"
+
+        if [ -n "''${CLAUDE_HOME:-}" ]; then
+          CLAUDE_DIR="$(realpath "$CLAUDE_HOME")"
+          if [ ! -d "$CLAUDE_DIR" ]; then
+            echo "error: CLAUDE_HOME=$CLAUDE_HOME is not a directory"
+            exit 1
+          fi
+          CLAUDE_TEMP=""
+        else
+          CLAUDE_DIR="$(mktemp -d)"
+          CLAUDE_TEMP="$CLAUDE_DIR"
+        fi
+
+        cleanup_claude_home() {
+          if [ -n "$CLAUDE_TEMP" ]; then
+            rm -rf "$CLAUDE_TEMP"
+          fi
+        }
+        trap cleanup_claude_home EXIT
+
+        CLAUDE_NEED_START=1
+        if ${pkgs.systemd}/bin/systemctl --user is-active "$CLAUDE_UNIT" &>/dev/null; then
+          if [ -f "$CLAUDE_STATE" ] && [ "$(cat "$CLAUDE_STATE")" = "$CLAUDE_DIR" ] && [ -S "$CLAUDE_SOCK" ]; then
+            CLAUDE_NEED_START=0
+          else
+            ${pkgs.systemd}/bin/systemctl --user stop "$CLAUDE_UNIT" 2>/dev/null || true
+          fi
+        fi
+
+        if [ "$CLAUDE_NEED_START" = "1" ]; then
+          rm -f "$CLAUDE_SOCK"
+
+          ${pkgs.systemd}/bin/systemd-run --user --unit="$CLAUDE_UNIT" --collect \
+            -- ${virtiofsd}/bin/virtiofsd \
+              --socket-path="$CLAUDE_SOCK" \
+              --shared-dir="$CLAUDE_DIR" \
+              --sandbox=namespace \
+              --uid-map ":0:$(id -u):1:" \
+              --gid-map ":0:$(id -g):1:" \
+              --translate-uid "map:1000:0:1" \
+              --translate-gid "map:1000:0:1" \
+              --socket-group="$(id -gn)" \
+              --xattr
+
+          echo "$CLAUDE_DIR" > "$CLAUDE_STATE"
+
+          for i in $(seq 1 50); do
+            [ -S "$CLAUDE_SOCK" ] && break
+            sleep 0.1
+          done
+          [ -S "$CLAUDE_SOCK" ] || { echo "error: claude-home virtiofsd socket did not appear"; exit 1; }
+        fi
+
         # Run QEMU with corrected paths
         bash <(${pkgs.gnused}/bin/sed \
           -e "s|/tmp/claude-vm-work|$WORK|g" \
           -e "s|claude-vm-virtiofs-work.sock|$SOCK|g" \
+          -e "s|/tmp/claude-vm-home|$CLAUDE_DIR|g" \
+          -e "s|claude-vm-virtiofs-claude-home.sock|$CLAUDE_SOCK|g" \
           ${runner}/bin/microvm-run)
       '';
       };

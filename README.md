@@ -17,6 +17,9 @@ make vm.run
 
 # Mount a specific project directory
 WORK_DIR=/path/to/project make vm.run
+
+# Persist Claude Code sessions/credentials across VM restarts
+CLAUDE_HOME=~/.claude-vm make vm.run
 ```
 
 ## Usage from anywhere
@@ -75,11 +78,21 @@ systemctl --user list-units 'claude-vm-virtiofsd-*'
 systemctl --user stop claude-vm-virtiofsd-<id>
 ```
 
+### Home directory persistence
+
+By default, the VM starts with a fresh, ephemeral home directory — sessions, credentials, auto-memory, and settings are lost on shutdown. To persist them across VM restarts, set `CLAUDE_HOME` to a directory on your host:
+
+```sh
+CLAUDE_HOME=~/.claude-vm make vm.run
+```
+
+This mounts the host directory at `/home/claude` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping. Claude Code stores state in both `~/.claude/` and `~/.claude.json`, so mounting the entire home directory ensures everything persists. When `CLAUDE_HOME` is unset, a temporary directory is used and cleaned up on exit.
+
 ### Sandboxing
 
 The VM provides strong isolation from the host:
 
-- **Filesystem** — only `/work` is shared; everything else is VM-local and ephemeral
+- **Filesystem** — only `/work` and optionally the home directory are shared; everything else is VM-local and ephemeral
 - **Processes** — completely isolated (separate kernel)
 - **Network** — QEMU user-mode NAT; the VM can reach the internet but can't bind host ports
 
@@ -113,3 +126,4 @@ Rebuild with `make vm`.
 | vCPUs    | 4       |
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
+| Home dir | Ephemeral (default) or host-shared via `CLAUDE_HOME` |
