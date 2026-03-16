@@ -22,10 +22,6 @@ WORK_DIR=/path/to/project make vm.run
 make vm.run   # terminal 1
 make vm.run   # terminal 2
 
-# Named instances for persistent Claude home directories
-INSTANCE=alex make vm.run
-INSTANCE=review make vm.run
-
 # Use a custom directory for Claude Code home
 CLAUDE_HOME=~/.claude-vm make vm.run
 ```
@@ -79,18 +75,13 @@ Then `nix develop` gives you `microvm-run` in the shell.
 
 The host `WORK_DIR` is shared into the VM at `/work` using virtiofs. A `virtiofsd` daemon is started automatically as a systemd user service (`claude-vm-virtiofsd-<id>`, where `<id>` is derived from the work directory path) — no root or sudo needed. It runs unprivileged in a user namespace with UID/GID translation so files created inside the VM are owned by your host user.
 
-Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. Multiple VMs on the **same** project also work automatically — each launch gets a random instance ID with its own virtiofsd daemons and sockets. For named, persistent sessions use the `INSTANCE` variable:
-
-```sh
-INSTANCE=alex make vm.run     # persistent session "alex"
-INSTANCE=review make vm.run   # persistent session "review"
-```
+Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. Multiple VMs on the **same** project also work automatically — each launch gets a random instance ID with its own virtiofsd daemons and sockets.
 
 The virtiofsd daemons are cleaned up automatically when the VM exits.
 
 ### Home directory persistence
 
-By default, `CLAUDE_HOME` is set to `$WORK_DIR/.claude-home` and shared across all instances on the same project, so sessions, credentials, auto-memory, and settings persist across VM restarts. To use a different directory, set `CLAUDE_HOME` explicitly:
+Claude Code state (sessions, credentials, settings) is stored in `$XDG_DATA_HOME/claude-microvm/<hash>` (defaulting to `~/.local/share/claude-microvm/<hash>`), where `<hash>` is derived from the `WORK_DIR` path. All instances on the same project share this directory automatically. To use a different directory, set `CLAUDE_HOME` explicitly:
 
 ```sh
 CLAUDE_HOME=~/.claude-vm make vm.run
@@ -136,4 +127,4 @@ Rebuild with `make vm`.
 | vCPUs    | 4       |
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
-| Home dir | `$WORK_DIR/.claude-home` (shared across instances) or custom via `CLAUDE_HOME` |
+| Home dir | `~/.local/share/claude-microvm/<hash>` (shared across instances) or custom via `CLAUDE_HOME` |
