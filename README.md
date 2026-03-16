@@ -18,11 +18,15 @@ make vm.run
 # Mount a specific project directory
 WORK_DIR=/path/to/project make vm.run
 
-# Run multiple VMs on the same project
-INSTANCE=1 make vm.run   # terminal 1
-INSTANCE=2 make vm.run   # terminal 2
+# Run multiple VMs on the same project (each gets a random instance ID)
+make vm.run   # terminal 1
+make vm.run   # terminal 2
 
-# Use a custom directory for Claude Code home (default: $WORK_DIR/.claude-home)
+# Named instances for persistent Claude home directories
+INSTANCE=alex make vm.run
+INSTANCE=review make vm.run
+
+# Use a custom directory for Claude Code home
 CLAUDE_HOME=~/.claude-vm make vm.run
 ```
 
@@ -75,23 +79,18 @@ Then `nix develop` gives you `microvm-run` in the shell.
 
 The host `WORK_DIR` is shared into the VM at `/work` using virtiofs. A `virtiofsd` daemon is started automatically as a systemd user service (`claude-vm-virtiofsd-<id>`, where `<id>` is derived from the work directory path) — no root or sudo needed. It runs unprivileged in a user namespace with UID/GID translation so files created inside the VM are owned by your host user.
 
-Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. To run multiple VMs on the **same** project, use the `INSTANCE` variable — each instance gets its own virtiofsd daemons, sockets, and Claude home directory (`$WORK_DIR/.claude-home-$INSTANCE`):
+Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. Multiple VMs on the **same** project also work automatically — each launch gets a random instance ID with its own virtiofsd daemons and sockets. For named, persistent sessions use the `INSTANCE` variable:
 
 ```sh
-INSTANCE=1 make vm.run   # terminal 1
-INSTANCE=2 make vm.run   # terminal 2
+INSTANCE=alex make vm.run     # persistent session "alex"
+INSTANCE=review make vm.run   # persistent session "review"
 ```
 
-The daemons persist between VM restarts for fast re-launches. Manage them with:
-
-```sh
-systemctl --user list-units 'claude-vm-virtiofsd-*'
-systemctl --user stop claude-vm-virtiofsd-<id>
-```
+The virtiofsd daemons are cleaned up automatically when the VM exits.
 
 ### Home directory persistence
 
-By default, `CLAUDE_HOME` is set to `$WORK_DIR/.claude-home` (or `$WORK_DIR/.claude-home-$INSTANCE` when using `INSTANCE`), so sessions, credentials, auto-memory, and settings persist across VM restarts automatically. To use a different directory, set `CLAUDE_HOME` explicitly:
+By default, `CLAUDE_HOME` is set to `$WORK_DIR/.claude-home` and shared across all instances on the same project, so sessions, credentials, auto-memory, and settings persist across VM restarts. To use a different directory, set `CLAUDE_HOME` explicitly:
 
 ```sh
 CLAUDE_HOME=~/.claude-vm make vm.run
@@ -137,4 +136,4 @@ Rebuild with `make vm`.
 | vCPUs    | 4       |
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
-| Home dir | `$WORK_DIR/.claude-home` (or `.claude-home-$INSTANCE`) or custom via `CLAUDE_HOME` |
+| Home dir | `$WORK_DIR/.claude-home` (shared across instances) or custom via `CLAUDE_HOME` |

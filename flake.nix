@@ -156,7 +156,7 @@ SEED
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        INSTANCE="''${INSTANCE:-}"
+        INSTANCE="''${INSTANCE:-$(od -An -tx4 -N4 /dev/urandom | tr -d ' ')}"
         BASE_ID=$(echo -n "$WORK" | sha256sum | cut -c1-8)
         if [ -n "$INSTANCE" ]; then
           ID="''${BASE_ID}-''${INSTANCE}"
@@ -213,11 +213,7 @@ SEED
         CLAUDE_STATE="$RUNTIME/claude-vm-virtiofsd-$ID-claude-home.dir"
 
         if [ -z "''${CLAUDE_HOME:-}" ]; then
-          if [ -n "$INSTANCE" ]; then
-            CLAUDE_HOME="$WORK/.claude-home-$INSTANCE"
-          else
-            CLAUDE_HOME="$WORK/.claude-home"
-          fi
+          CLAUDE_HOME="$WORK/.claude-home"
         fi
         CLAUDE_DIR="$(realpath "$CLAUDE_HOME" 2>/dev/null || echo "$CLAUDE_HOME")"
         if [ ! -d "$CLAUDE_DIR" ]; then
@@ -225,12 +221,15 @@ SEED
         fi
         CLAUDE_TEMP=""
 
-        cleanup_claude_home() {
+        cleanup() {
+          ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
+          ${pkgs.systemd}/bin/systemctl --user stop "$CLAUDE_UNIT" 2>/dev/null || true
+          rm -f "$SOCK" "$CLAUDE_SOCK" "$STATE" "$CLAUDE_STATE"
           if [ -n "$CLAUDE_TEMP" ]; then
             rm -rf "$CLAUDE_TEMP"
           fi
         }
-        trap cleanup_claude_home EXIT
+        trap cleanup EXIT
 
         CLAUDE_NEED_START=1
         if ${pkgs.systemd}/bin/systemctl --user is-active "$CLAUDE_UNIT" &>/dev/null; then
