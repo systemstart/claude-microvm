@@ -156,13 +156,7 @@ SEED
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        INSTANCE="''${INSTANCE:-$(od -An -tx4 -N4 /dev/urandom | tr -d ' ')}"
-        BASE_ID=$(echo -n "$WORK" | sha256sum | cut -c1-8)
-        if [ -n "$INSTANCE" ]; then
-          ID="''${BASE_ID}-''${INSTANCE}"
-        else
-          ID="$BASE_ID"
-        fi
+        ID="$(cat /proc/sys/kernel/random/uuid)"
 
         # --- Work share (virtiofsd) ---
         SOCK="$RUNTIME/claude-vm-virtiofs-$ID.sock"
