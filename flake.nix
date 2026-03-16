@@ -100,6 +100,29 @@
             programs.bash.interactiveShellInit = ''
               eval "$(direnv hook bash)"
               git config --global --add safe.directory /work 2>/dev/null || true
+
+              # Seed auto-memory on first run so Claude reminds the user
+              # to add .claude-home to .gitignore
+              MEMORY_DIR="$HOME/.claude/projects/-work/memory"
+              MEMORY_FILE="$MEMORY_DIR/MEMORY.md"
+              if [ ! -f "$MEMORY_FILE" ]; then
+                mkdir -p "$MEMORY_DIR"
+                cat > "$MEMORY_FILE" << 'SEED'
+# IMPORTANT — First-run reminder
+
+**ACTION REQUIRED:** At the START of every conversation, check whether `.claude-home*` is listed in `/work/.gitignore`.
+
+If `.claude-home*` is NOT in `.gitignore`, you MUST immediately and loudly warn the user:
+
+> **WARNING: `.claude-home*` is not in your `.gitignore`!**
+> This directory contains Claude Code session data, credentials, and settings.
+> Committing it to git could leak sensitive information.
+> **Add `.claude-home*` to your `.gitignore` NOW.**
+
+Then offer to add it for them. Do NOT proceed with any other task until this is resolved.
+SEED
+              fi
+
               cd /work 2>/dev/null || true
               claude; sudo poweroff
             '';
@@ -133,7 +156,13 @@
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        ID=$(echo -n "$WORK" | sha256sum | cut -c1-8)
+        INSTANCE="''${INSTANCE:-}"
+        BASE_ID=$(echo -n "$WORK" | sha256sum | cut -c1-8)
+        if [ -n "$INSTANCE" ]; then
+          ID="''${BASE_ID}-''${INSTANCE}"
+        else
+          ID="$BASE_ID"
+        fi
 
         # --- Work share (virtiofsd) ---
         SOCK="$RUNTIME/claude-vm-virtiofs-$ID.sock"
@@ -183,17 +212,18 @@
         CLAUDE_UNIT="claude-vm-virtiofsd-$ID-claude-home"
         CLAUDE_STATE="$RUNTIME/claude-vm-virtiofsd-$ID-claude-home.dir"
 
-        if [ -n "''${CLAUDE_HOME:-}" ]; then
-          CLAUDE_DIR="$(realpath "$CLAUDE_HOME")"
-          if [ ! -d "$CLAUDE_DIR" ]; then
-            echo "error: CLAUDE_HOME=$CLAUDE_HOME is not a directory"
-            exit 1
+        if [ -z "''${CLAUDE_HOME:-}" ]; then
+          if [ -n "$INSTANCE" ]; then
+            CLAUDE_HOME="$WORK/.claude-home-$INSTANCE"
+          else
+            CLAUDE_HOME="$WORK/.claude-home"
           fi
-          CLAUDE_TEMP=""
-        else
-          CLAUDE_DIR="$(mktemp -d)"
-          CLAUDE_TEMP="$CLAUDE_DIR"
         fi
+        CLAUDE_DIR="$(realpath "$CLAUDE_HOME" 2>/dev/null || echo "$CLAUDE_HOME")"
+        if [ ! -d "$CLAUDE_DIR" ]; then
+          mkdir -p "$CLAUDE_DIR"
+        fi
+        CLAUDE_TEMP=""
 
         cleanup_claude_home() {
           if [ -n "$CLAUDE_TEMP" ]; then

@@ -18,7 +18,11 @@ make vm.run
 # Mount a specific project directory
 WORK_DIR=/path/to/project make vm.run
 
-# Persist Claude Code sessions/credentials across VM restarts
+# Run multiple VMs on the same project
+INSTANCE=1 make vm.run   # terminal 1
+INSTANCE=2 make vm.run   # terminal 2
+
+# Use a custom directory for Claude Code home (default: $WORK_DIR/.claude-home)
 CLAUDE_HOME=~/.claude-vm make vm.run
 ```
 
@@ -71,7 +75,14 @@ Then `nix develop` gives you `microvm-run` in the shell.
 
 The host `WORK_DIR` is shared into the VM at `/work` using virtiofs. A `virtiofsd` daemon is started automatically as a systemd user service (`claude-vm-virtiofsd-<id>`, where `<id>` is derived from the work directory path) — no root or sudo needed. It runs unprivileged in a user namespace with UID/GID translation so files created inside the VM are owned by your host user.
 
-Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. The daemon persists between VM restarts for fast re-launches. Manage it with:
+Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. To run multiple VMs on the **same** project, use the `INSTANCE` variable — each instance gets its own virtiofsd daemons, sockets, and Claude home directory (`$WORK_DIR/.claude-home-$INSTANCE`):
+
+```sh
+INSTANCE=1 make vm.run   # terminal 1
+INSTANCE=2 make vm.run   # terminal 2
+```
+
+The daemons persist between VM restarts for fast re-launches. Manage them with:
 
 ```sh
 systemctl --user list-units 'claude-vm-virtiofsd-*'
@@ -80,13 +91,13 @@ systemctl --user stop claude-vm-virtiofsd-<id>
 
 ### Home directory persistence
 
-By default, the VM starts with a fresh, ephemeral home directory — sessions, credentials, auto-memory, and settings are lost on shutdown. To persist them across VM restarts, set `CLAUDE_HOME` to a directory on your host:
+By default, `CLAUDE_HOME` is set to `$WORK_DIR/.claude-home` (or `$WORK_DIR/.claude-home-$INSTANCE` when using `INSTANCE`), so sessions, credentials, auto-memory, and settings persist across VM restarts automatically. To use a different directory, set `CLAUDE_HOME` explicitly:
 
 ```sh
 CLAUDE_HOME=~/.claude-vm make vm.run
 ```
 
-This mounts the host directory at `/home/claude` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping. Claude Code stores state in both `~/.claude/` and `~/.claude.json`, so mounting the entire home directory ensures everything persists. When `CLAUDE_HOME` is unset, a temporary directory is used and cleaned up on exit.
+This mounts the host directory at `/home/claude` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping. Claude Code stores state in both `~/.claude/` and `~/.claude.json`, so mounting the entire home directory ensures everything persists.
 
 ### Sandboxing
 
@@ -126,4 +137,4 @@ Rebuild with `make vm`.
 | vCPUs    | 4       |
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
-| Home dir | Ephemeral (default) or host-shared via `CLAUDE_HOME` |
+| Home dir | `$WORK_DIR/.claude-home` (or `.claude-home-$INSTANCE`) or custom via `CLAUDE_HOME` |
