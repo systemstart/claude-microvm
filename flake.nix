@@ -29,6 +29,8 @@
               mem = 4096;
               vcpu = 4;
 
+              writableStoreOverlay = "/nix/.rw-store";
+
               shares = [
                 {
                   tag = "ro-store";
@@ -89,8 +91,12 @@
               git
               openssh
               cacert
-              direnv
             ];
+
+            programs.direnv = {
+              enable = true;
+              nix-direnv.enable = true;
+            };
 
             environment.variables = {
               SSL_CERT_FILE = "/etc/ssl/certs/ca-bundle.crt";
@@ -98,10 +104,25 @@
             };
 
             programs.bash.interactiveShellInit = ''
-              eval "$(direnv hook bash)"
               git config --global --add safe.directory /work 2>/dev/null || true
 
               cd /work 2>/dev/null || true
+              [ -f ~/.microvm-env ] && source ~/.microvm-env
+              if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
+                if [ -f ~/.microvm-devshell ] && [ -s ~/.microvm-devshell ]; then
+                  echo "loading dev environment..."
+                  _ORIG_PATH="$PATH"
+                  source ~/.microvm-devshell 2>/dev/null || true
+                  export PATH="$PATH:$_ORIG_PATH"
+                  unset _ORIG_PATH
+                else
+                  echo "running direnv allow ..."
+                  direnv allow 2>/dev/null || true
+                  echo "running direnv export ..."
+                  eval "$(direnv export bash 2>/dev/null)" || true
+                fi
+              fi
+              echo "starting claude ..."
               claude; sudo poweroff
             '';
 
@@ -236,6 +257,26 @@
             sleep 0.1
           done
           [ -S "$CLAUDE_SOCK" ] || { echo "error: claude-home virtiofsd socket did not appear"; exit 1; }
+        fi
+
+        # Write host env vars for the VM
+        echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$CLAUDE_DIR/.microvm-env"
+
+        # Pre-cache dev shell environment on host (fast) so the VM doesn't have to evaluate nix
+        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && [ -f "$WORK/flake.nix" ]; then
+          _DEVSHELL_CACHE="$CLAUDE_DIR/.microvm-devshell"
+          _CURRENT_HASH="$(cat "$WORK/flake.nix" "$WORK/flake.lock" 2>/dev/null | sha256sum | cut -c1-16)"
+          _CACHED_HASH=""
+          [ -f "$_DEVSHELL_CACHE.hash" ] && _CACHED_HASH="$(cat "$_DEVSHELL_CACHE.hash")"
+          if [ "$_CURRENT_HASH" != "$_CACHED_HASH" ] || [ ! -s "$_DEVSHELL_CACHE" ]; then
+            echo "caching dev shell environment..."
+            if nix print-dev-env --no-update-lock-file "$WORK" > "$_DEVSHELL_CACHE.tmp" 2>/dev/null; then
+              mv "$_DEVSHELL_CACHE.tmp" "$_DEVSHELL_CACHE"
+              echo "$_CURRENT_HASH" > "$_DEVSHELL_CACHE.hash"
+            else
+              rm -f "$_DEVSHELL_CACHE.tmp"
+            fi
+          fi
         fi
 
         # Run QEMU with corrected paths
