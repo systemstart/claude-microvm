@@ -88,6 +88,7 @@
 
             environment.systemPackages = with pkgs; [
               claude-code
+              devenv
               git
               openssh
               cacert
@@ -116,10 +117,8 @@
                   export PATH="$PATH:$_ORIG_PATH"
                   unset _ORIG_PATH
                 else
-                  echo "running direnv allow ..."
-                  direnv allow 2>/dev/null || true
-                  echo "running direnv export ..."
-                  eval "$(direnv export bash 2>/dev/null)" || true
+                  echo "warning: dev shell cache not found — ensure DIRENV_ALLOW=1 is set on host"
+                  [ -f ~/.microvm-devshell.err ] && cat ~/.microvm-devshell.err
                 fi
               fi
               echo "starting claude ..."
@@ -131,7 +130,11 @@
             ];
 
 
-            nix.settings.experimental-features = [ "nix-command" "flakes" ];
+            nix.settings = {
+              experimental-features = [ "nix-command" "flakes" ];
+              extra-substituters = [ "https://devenv.cachix.org" ];
+              extra-trusted-public-keys = [ "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=" ];
+            };
             nix.gc = {
               automatic = true;
               dates = "daily";
@@ -300,16 +303,24 @@
         echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$CLAUDE_DIR/.microvm-env"
 
         # Pre-cache dev shell environment on host (fast) so the VM doesn't have to evaluate nix
-        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && [ -f "$WORK/flake.nix" ]; then
-          _DEVSHELL_CACHE="$CLAUDE_DIR/.microvm-devshell"
-          _CURRENT_HASH="$(cat "$WORK/flake.nix" "$WORK/flake.lock" 2>/dev/null | sha256sum | cut -c1-16)"
+        _DEVSHELL_CACHE="$CLAUDE_DIR/.microvm-devshell"
+        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && [ -f "$WORK/flake.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; then
+          _CURRENT_HASH="$( (cat "$WORK/flake.nix" "$WORK/flake.lock" "$WORK/.devenv.flake.nix" "$WORK/devenv.nix" "$WORK/devenv.yaml" "$WORK/devenv.lock" 2>/dev/null || true) | sha256sum | cut -c1-16)"
           _CACHED_HASH=""
           [ -f "$_DEVSHELL_CACHE.hash" ] && _CACHED_HASH="$(cat "$_DEVSHELL_CACHE.hash")"
           if [ "$_CURRENT_HASH" != "$_CACHED_HASH" ] || [ ! -s "$_DEVSHELL_CACHE" ]; then
             echo "caching dev shell environment..."
-            if nix print-dev-env --no-update-lock-file "$WORK" > "$_DEVSHELL_CACHE.tmp" 2>/dev/null; then
+            if [ -f "$WORK/.devenv.flake.nix" ] && ! [ -f "$WORK/flake.nix" ]; then
+              _CACHE_CMD="devenv print-dev-env"
+            elif [ -f "$WORK/devenv.nix" ]; then
+              _CACHE_CMD="nix print-dev-env --no-update-lock-file --impure $WORK"
+            else
+              _CACHE_CMD="nix print-dev-env --no-update-lock-file $WORK"
+            fi
+            if (cd "$WORK" && eval "$_CACHE_CMD") > "$_DEVSHELL_CACHE.tmp" 2>"$_DEVSHELL_CACHE.err"; then
               mv "$_DEVSHELL_CACHE.tmp" "$_DEVSHELL_CACHE"
               echo "$_CURRENT_HASH" > "$_DEVSHELL_CACHE.hash"
+              rm -f "$_DEVSHELL_CACHE.err"
             else
               rm -f "$_DEVSHELL_CACHE.tmp"
             fi

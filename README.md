@@ -22,7 +22,7 @@ WORK_DIR=/path/to/project make vm.run
 make vm.run   # terminal 1
 make vm.run   # terminal 2
 
-# Load WORK_DIR's flake.nix dev shell into Claude Code's PATH
+# Load WORK_DIR's dev shell (flake.nix or devenv) into Claude Code's PATH
 DIRENV_ALLOW=1 make vm.run
 
 # Use a custom directory for Claude Code home
@@ -108,15 +108,19 @@ Exiting Claude Code automatically powers off the VM.
 
 ### Nix dev shell support
 
-If your project has a `flake.nix` with a dev shell, set `DIRENV_ALLOW=1` to make those tools available to Claude Code inside the VM:
+If your project has a `flake.nix` dev shell or uses [devenv](https://devenv.sh/), set `DIRENV_ALLOW=1` to make those tools available to Claude Code inside the VM:
 
 ```sh
 DIRENV_ALLOW=1 WORK_DIR=/path/to/project make vm.run
 ```
 
-The dev shell environment is evaluated on the **host** via `nix print-dev-env` (where nix caches make it fast) and cached in `CLAUDE_HOME`. The cache is invalidated automatically when `flake.nix` or `flake.lock` changes. The VM sources the cached result on boot — no nix evaluation inside the guest.
+The dev shell environment is cached on the host and sourced on VM boot — no nix evaluation inside the guest:
 
-If the host-side cache is unavailable, the VM falls back to evaluating via direnv + nix-direnv inside the guest (slower).
+- **Flake projects** (`flake.nix`): cached via `nix print-dev-env`
+- **Flake-based devenv** (`flake.nix` + `devenv.nix`): cached via `nix print-dev-env --impure`
+- **Non-flake devenv** (`.devenv.flake.nix`): cached via `devenv print-dev-env` (requires `devenv` on host PATH)
+
+The cache is invalidated automatically when `flake.nix`, `flake.lock`, `.devenv.flake.nix`, `devenv.nix`, `devenv.yaml`, or `devenv.lock` changes. If caching fails, check `~/.microvm-devshell.err` inside the VM for the error.
 
 ## Customization
 
@@ -150,4 +154,4 @@ Rebuild with `make vm`.
 |----------|-------------|---------|
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `CLAUDE_HOME` | Host directory for Claude Code state (mounted at `/home/claude`) | `$XDG_DATA_HOME/claude-microvm/<hash>` |
-| `DIRENV_ALLOW` | Set to `1` to load the project's `flake.nix` dev shell into Claude Code's environment | `0` |
+| `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into Claude Code's environment | `0` |
