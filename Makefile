@@ -4,12 +4,18 @@ export NIXPKGS_ALLOW_UNFREE := 1
 
 WORK_DIR ?= $(shell pwd)
 
-.PHONY: vm vm.run tag
+.PHONY: vm vm.run vm-cri vm-cri.run tag
 
 vm:
 	nix build $(NIX_FLAGS) .#vm
 
 vm.run: vm
+	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
+
+vm-cri:
+	nix build $(NIX_FLAGS) .#vm-cri
+
+vm-cri.run: vm-cri
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
 
 tag:

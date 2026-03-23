@@ -16,3 +16,4 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v13
       - run: nix flake check --impure
       - run: nix build --impure .#vm
+      - run: nix build --impure .#vm-cri

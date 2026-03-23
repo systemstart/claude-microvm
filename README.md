@@ -9,11 +9,23 @@ Claude Code starts automatically on boot. Exiting claude shuts down the VM.
 - [Nix](https://nixos.org/) with flakes enabled
 - KVM support (`/dev/kvm`)
 
+## Flavors
+
+The VM is built as composable NixOS modules under `modules/`:
+
+| Flavor | Package | Description |
+|--------|---------|-------------|
+| `vm` (default) | `.#vm` | Lean base image — Claude Code, git, devenv |
+| `vm-cri` | `.#vm-cri` | Base + container runtimes (Docker, containerd, CRI-O) |
+
 ## Quick start
 
 ```sh
 # Build and run with current directory mounted at /work
 make vm.run
+
+# Build and run with container runtime support
+make vm-cri.run
 
 # Mount a specific project directory
 WORK_DIR=/path/to/project make vm.run
@@ -34,20 +46,29 @@ CLAUDE_HOME=~/.claude-vm make vm.run
 ### `nix run` (no install)
 
 ```sh
-# From the repo directory
+# From the repo directory (base flavor)
 WORK_DIR=. nix run
+
+# With container runtime support
+WORK_DIR=. nix run .#vm-cri
 
 # From a local checkout
 WORK_DIR=/path/to/project nix run /path/to/this/repo
+WORK_DIR=/path/to/project nix run /path/to/this/repo#vm-cri
 
 # Directly from git
 WORK_DIR=. nix run github:systemstart/claude-microvm
+WORK_DIR=. nix run github:systemstart/claude-microvm#vm-cri
 ```
 
 ### Install to PATH
 
 ```sh
+# Base flavor
 nix profile install github:systemstart/claude-microvm
+
+# CRI flavor
+nix profile install github:systemstart/claude-microvm#vm-cri
 
 # Now available everywhere
 WORK_DIR=/path/to/project microvm-run
@@ -64,7 +85,10 @@ Add as a dependency in another project's `flake.nix`:
   outputs = { nixpkgs, claude-vm, ... }:
     let system = "x86_64-linux"; in {
       devShells.${system}.default = nixpkgs.legacyPackages.${system}.mkShell {
-        packages = [ claude-vm.packages.${system}.vm ];
+        packages = [
+          claude-vm.packages.${system}.vm       # base
+          # claude-vm.packages.${system}.vm-cri # with container runtimes
+        ];
       };
     };
 }
@@ -142,7 +166,7 @@ Rebuild with `make vm`.
 
 | Resource | Default |
 |----------|---------|
-| RAM      | 4096 MB |
+| RAM      | 4096 MB (base), 8192 MB (CRI) |
 | vCPUs    | 4       |
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
@@ -155,3 +179,67 @@ Rebuild with `make vm`.
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `CLAUDE_HOME` | Host directory for Claude Code state (mounted at `/home/claude`) | `$XDG_DATA_HOME/claude-microvm/<hash>` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into Claude Code's environment | `0` |
+| `ENABLE_CRI` | Comma-separated list of container runtimes to activate (vm-cri only): `containerd`, `crun`, `crio`, `docker` | (disabled) |
+
+### Container runtime support
+
+Container runtimes are available in the `vm-cri` flavor. Use `make vm-cri.run` or `nix run .#vm-cri` to build with CRI support, then activate runtimes via `ENABLE_CRI`:
+
+```sh
+# Docker (includes Docker Compose)
+ENABLE_CRI=docker make vm-cri.run
+
+# Single CRI runtime
+ENABLE_CRI=containerd make vm-cri.run
+
+# Multiple runtimes
+ENABLE_CRI=containerd,docker make vm-cri.run
+
+# crun (lightweight OCI runtime via a dedicated containerd instance)
+ENABLE_CRI=crun make vm-cri.run
+```
+
+The `vm-cri` flavor defaults to 8 GiB RAM (vs 4 GiB for base). Container images and layers are stored on the host at `$CLAUDE_HOME/cri-storage/` via a dedicated virtiofs share at `/var/lib/containers`, so they persist across VM restarts and don't consume the VM's RAM-backed root filesystem.
+
+#### Available runtimes
+
+| Value | Runtime | Socket |
+|-------|---------|--------|
+| `containerd` | containerd + runc | `/run/containerd/containerd.sock` |
+| `crun` | containerd + crun | `/run/containerd-crun/containerd.sock` |
+| `crio` | CRI-O (runc default, crun available) | `/run/crio/crio.sock` |
+| `docker` | Docker daemon (includes Compose) | `/var/run/docker.sock` |
+
+#### CRI clients
+
+All clients are pre-installed. Daemon sockets are group-readable by the `claude` user, so no `sudo` is needed:
+
+```sh
+# Docker
+docker run --rm hello-world
+docker compose up -d
+
+# Podman (via podman.sock)
+podman run --rm hello-world
+
+# crictl — defaults to first activated CRI runtime's socket
+crictl info
+crictl images
+crictl ps
+
+# ctr — low-level containerd CLI (debugging/testing)
+ctr images ls
+ctr containers ls
+
+# kubectl — for CRI inspection (no kubelet/cluster required)
+kubectl get --raw /api 2>/dev/null || echo "no API server — use crictl for CRI access"
+```
+
+> **Note:** `nerdctl` is installed but does not work as a non-root user. It
+> unconditionally enters a rootless-containerd code path when UID != 0 and
+> fails before it ever reads the socket address. Use `docker`, `crictl`, or
+> `ctr` instead.
+
+#### CNI networking
+
+A default bridge network (`cni0`, `10.88.0.0/16`) is configured automatically with masquerading, port mapping, and firewall support.
