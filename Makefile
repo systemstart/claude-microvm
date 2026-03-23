@@ -18,7 +18,7 @@ vm-cri:
 vm-cri.run: vm-cri
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
 
-tag:
+release-tag:
 	$(eval VERSION ?= $(shell gsemver bump))
 	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
 	git push origin "v$(VERSION)"
