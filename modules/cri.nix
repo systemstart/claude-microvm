@@ -9,13 +9,14 @@ in
     microvm.mem = lib.mkDefault 8192;
 
     programs.bash.interactiveShellInit = ''
-      # Clean up old sudo reminder if present
-      if grep -q '<!-- CRI-SUDO -->' ~/.claude/CLAUDE.md 2>/dev/null; then
-        sed -i '/<!-- CRI-SUDO -->/,/permission errors\./d' ~/.claude/CLAUDE.md
-      fi
-      # Seed CRI usage info into Claude's user-level memory
-      if ! grep -q '<!-- CRI-USAGE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
-        cat >> ~/.claude/CLAUDE.md << 'CRIEOF'
+      # Seed CRI usage info into Claude Code's user-level memory (only if ~/.claude exists)
+      if [ -d ~/.claude ]; then
+        # Clean up old sudo reminder if present
+        if grep -q '<!-- CRI-SUDO -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+          sed -i '/<!-- CRI-SUDO -->/,/permission errors\./d' ~/.claude/CLAUDE.md
+        fi
+        if ! grep -q '<!-- CRI-USAGE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+          cat >> ~/.claude/CLAUDE.md << 'CRIEOF'
 
 <!-- CRI-USAGE -->
 # Container Runtime Usage
@@ -28,8 +29,9 @@ Container runtime CLIs work without `sudo`:
 - `podman ...`
 
 No `sudo` needed — the CLIs connect to daemon sockets that are
-configured with appropriate group permissions for the claude user.
+configured with appropriate group permissions for the agent user.
 CRIEOF
+        fi
       fi
       export CONTAINER_HOST=unix:///run/podman/podman.sock
     '';
@@ -37,7 +39,7 @@ CRIEOF
     microvm.shares = [
       {
         tag = "cri-storage";
-        source = "/tmp/claude-vm-cri-storage";
+        source = "/tmp/${config.networking.hostName}-cri-storage";
         mountPoint = "/var/lib/containers";
         proto = "virtiofs";
       }
@@ -50,7 +52,7 @@ CRIEOF
     };
 
     users.groups.docker = {};
-    users.users.claude.extraGroups = [ "docker" ];
+    users.users.agent.extraGroups = [ "docker" ];
 
     environment.systemPackages = with pkgs; [
       containerd
@@ -242,7 +244,7 @@ CRIEOF
 
     systemd.services.cri-activate = {
       description = "Activate CRI runtimes based on ENABLE_CRI";
-      after = [ "network.target" "home-claude.mount" "var-lib-containers.mount" ];
+      after = [ "network.target" "home-agent.mount" "var-lib-containers.mount" ];
       before = [ "getty@tty1.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
@@ -250,7 +252,7 @@ CRIEOF
         RemainAfterExit = true;
       };
       script = ''
-        ENV_FILE="/home/claude/.microvm-env"
+        ENV_FILE="/home/agent/.microvm-env"
         [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 
         ENABLE_CRI="''${ENABLE_CRI:-}"
@@ -280,7 +282,7 @@ CRIEOF
                 sleep 0.2
               done
               if [ -S /run/crio/crio.sock ]; then
-                chgrp claude /run/crio/crio.sock
+                chgrp agent /run/crio/crio.sock
                 chmod 0660 /run/crio/crio.sock
               fi
               [ -z "$FIRST_ENDPOINT" ] && FIRST_ENDPOINT="unix:///run/crio/crio.sock"
@@ -352,7 +354,7 @@ CRIEOF
       socketConfig = {
         SocketMode = "0660";
         SocketUser = "root";
-        SocketGroup = "claude";
+        SocketGroup = "agent";
       };
     };
 

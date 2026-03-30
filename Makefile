@@ -4,18 +4,24 @@ export NIXPKGS_ALLOW_UNFREE := 1
 
 WORK_DIR ?= $(shell pwd)
 
-.PHONY: vm vm.run vm-cri vm-cri.run tag
+.PHONY: claude claude.run gemini gemini.run codex codex.run release-tag
 
-vm:
-	nix build $(NIX_FLAGS) .#vm
+claude:
+	nix build $(NIX_FLAGS) .#claude
 
-vm.run: vm
+claude.run: claude
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
 
-vm-cri:
-	nix build $(NIX_FLAGS) .#vm-cri
+gemini:
+	nix build $(NIX_FLAGS) .#gemini
 
-vm-cri.run: vm-cri
+gemini.run: gemini
+	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
+
+codex:
+	nix build $(NIX_FLAGS) .#codex
+
+codex.run: codex
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
 
 release-tag:

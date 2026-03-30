@@ -16,23 +16,33 @@
       forSystems = lib.genAttrs linuxSystems;
 
       vmFlavors = {
-        vm     = { suffix = "";     extraModules = [];                                                                    enableCri = false; };
-        vm-cri = { suffix = "-cri"; extraModules = [ ./modules/cri.nix { claude-vm.cri.enable = true; } ]; enableCri = true;  };
+        claude = { suffix = "";        agentModule = ./modules/agents/claude.nix; dataDirName = "claude-microvm"; apiKeyVars = [ "ANTHROPIC_API_KEY" ]; };
+        gemini = { suffix = "-gemini"; agentModule = ./modules/agents/gemini.nix; dataDirName = "gemini-microvm"; apiKeyVars = [ "GEMINI_API_KEY" ]; };
+        codex  = { suffix = "-codex";  agentModule = ./modules/agents/codex.nix;  dataDirName = "codex-microvm";  apiKeyVars = [ "OPENAI_API_KEY" ]; };
       };
 
-      mkRunnerScript = { pkgs, runner, enableCri }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName }:
         let
           virtiofsd = pkgs.virtiofsd;
+          hostname = "${agentName}-vm";
+          apiKeyForwarding = lib.concatStringsSep "\n" (map (var:
+            ''[ -n "''${${var}:-}" ] && echo "${var}=''${${var}}" >> "$AGENT_DIR/.microvm-env"''
+          ) apiKeyVars);
         in pkgs.writeShellScriptBin "microvm-run" ''
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         ID="$(cat /proc/sys/kernel/random/uuid)"
 
+        # Derive project basename for host-visible identifiers
+        WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
+        [ -z "$WORK_BASENAME" ] && WORK_BASENAME="root"
+        VM_ID="$WORK_BASENAME-${hostname}"
+
         # --- Work share (virtiofsd) ---
-        SOCK="$RUNTIME/claude-vm-virtiofs-$ID.sock"
-        UNIT="claude-vm-virtiofsd-$ID"
-        STATE="$RUNTIME/claude-vm-virtiofsd-$ID.workdir"
+        SOCK="$RUNTIME/$VM_ID-virtiofs-$ID.sock"
+        UNIT="$VM_ID-virtiofsd-$ID"
+        STATE="$RUNTIME/$VM_ID-virtiofsd-$ID.workdir"
 
         # (Re)start virtiofsd if not running or WORK_DIR changed
         NEED_START=1
@@ -72,58 +82,56 @@
           [ -S "$SOCK" ] || { echo "error: virtiofsd socket did not appear"; exit 1; }
         fi
 
-        # --- Claude home share (virtiofsd) ---
-        CLAUDE_SOCK="$RUNTIME/claude-vm-virtiofs-$ID-claude-home.sock"
-        CLAUDE_UNIT="claude-vm-virtiofsd-$ID-claude-home"
-        CLAUDE_STATE="$RUNTIME/claude-vm-virtiofsd-$ID-claude-home.dir"
+        # --- Agent home share (virtiofsd) ---
+        AGENT_SOCK="$RUNTIME/$VM_ID-virtiofs-$ID-agent-home.sock"
+        AGENT_UNIT="$VM_ID-virtiofsd-$ID-agent-home"
+        AGENT_STATE="$RUNTIME/$VM_ID-virtiofsd-$ID-agent-home.dir"
 
-        if [ -z "''${CLAUDE_HOME:-}" ]; then
+        if [ -z "''${AGENT_HOME:-}" ]; then
           DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
           WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
-          CLAUDE_HOME="$DATA_HOME/claude-microvm/$WORK_HASH"
+          AGENT_HOME="$DATA_HOME/${dataDirName}/$WORK_BASENAME-$WORK_HASH"
         fi
-        CLAUDE_DIR="$(realpath "$CLAUDE_HOME" 2>/dev/null || echo "$CLAUDE_HOME")"
-        if [ ! -d "$CLAUDE_DIR" ]; then
-          mkdir -p "$CLAUDE_DIR"
+        AGENT_DIR="$(realpath "$AGENT_HOME" 2>/dev/null || echo "$AGENT_HOME")"
+        if [ ! -d "$AGENT_DIR" ]; then
+          mkdir -p "$AGENT_DIR"
         fi
-        CLAUDE_TEMP=""
+        AGENT_TEMP=""
 
-        ${lib.optionalString enableCri ''
         # --- CRI storage share (virtiofsd) ---
-        CRI_SOCK="$RUNTIME/claude-vm-virtiofs-$ID-cri-storage.sock"
-        CRI_UNIT="claude-vm-virtiofsd-$ID-cri-storage"
-        CRI_STATE="$RUNTIME/claude-vm-virtiofsd-$ID-cri-storage.dir"
-        CRI_DIR="$CLAUDE_DIR/cri-storage"
+        CRI_SOCK="$RUNTIME/$VM_ID-virtiofs-$ID-cri-storage.sock"
+        CRI_UNIT="$VM_ID-virtiofsd-$ID-cri-storage"
+        CRI_STATE="$RUNTIME/$VM_ID-virtiofsd-$ID-cri-storage.dir"
+        CRI_DIR="$AGENT_DIR/cri-storage"
         mkdir -p "$CRI_DIR"
-        ''}
 
         cleanup() {
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
-          ${pkgs.systemd}/bin/systemctl --user stop "$CLAUDE_UNIT" 2>/dev/null || true
-          ${lib.optionalString enableCri ''${pkgs.systemd}/bin/systemctl --user stop "$CRI_UNIT" 2>/dev/null || true''}
-          rm -f "$SOCK" "$CLAUDE_SOCK" "$STATE" "$CLAUDE_STATE"${lib.optionalString enableCri '' "$CRI_SOCK" "$CRI_STATE"''}
-          if [ -n "$CLAUDE_TEMP" ]; then
-            rm -rf "$CLAUDE_TEMP"
+          ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
+          ${pkgs.systemd}/bin/systemctl --user stop "$CRI_UNIT" 2>/dev/null || true
+          rm -f "$SOCK" "$AGENT_SOCK" "$STATE" "$AGENT_STATE" "$CRI_SOCK" "$CRI_STATE"
+          if [ -n "$AGENT_TEMP" ]; then
+            rm -rf "$AGENT_TEMP"
           fi
         }
         trap cleanup EXIT
 
-        CLAUDE_NEED_START=1
-        if ${pkgs.systemd}/bin/systemctl --user is-active "$CLAUDE_UNIT" &>/dev/null; then
-          if [ -f "$CLAUDE_STATE" ] && [ "$(cat "$CLAUDE_STATE")" = "$CLAUDE_DIR" ] && [ -S "$CLAUDE_SOCK" ]; then
-            CLAUDE_NEED_START=0
+        AGENT_NEED_START=1
+        if ${pkgs.systemd}/bin/systemctl --user is-active "$AGENT_UNIT" &>/dev/null; then
+          if [ -f "$AGENT_STATE" ] && [ "$(cat "$AGENT_STATE")" = "$AGENT_DIR" ] && [ -S "$AGENT_SOCK" ]; then
+            AGENT_NEED_START=0
           else
-            ${pkgs.systemd}/bin/systemctl --user stop "$CLAUDE_UNIT" 2>/dev/null || true
+            ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
           fi
         fi
 
-        if [ "$CLAUDE_NEED_START" = "1" ]; then
-          rm -f "$CLAUDE_SOCK"
+        if [ "$AGENT_NEED_START" = "1" ]; then
+          rm -f "$AGENT_SOCK"
 
-          ${pkgs.systemd}/bin/systemd-run --user --unit="$CLAUDE_UNIT" --collect \
+          ${pkgs.systemd}/bin/systemd-run --user --unit="$AGENT_UNIT" --collect \
             -- ${virtiofsd}/bin/virtiofsd \
-              --socket-path="$CLAUDE_SOCK" \
-              --shared-dir="$CLAUDE_DIR" \
+              --socket-path="$AGENT_SOCK" \
+              --shared-dir="$AGENT_DIR" \
               --sandbox=namespace \
               --uid-map ":0:$(id -u):1:" \
               --gid-map ":0:$(id -g):1:" \
@@ -132,16 +140,15 @@
               --socket-group="$(id -gn)" \
               --xattr
 
-          echo "$CLAUDE_DIR" > "$CLAUDE_STATE"
+          echo "$AGENT_DIR" > "$AGENT_STATE"
 
           for i in $(seq 1 50); do
-            [ -S "$CLAUDE_SOCK" ] && break
+            [ -S "$AGENT_SOCK" ] && break
             sleep 0.1
           done
-          [ -S "$CLAUDE_SOCK" ] || { echo "error: claude-home virtiofsd socket did not appear"; exit 1; }
+          [ -S "$AGENT_SOCK" ] || { echo "error: agent-home virtiofsd socket did not appear"; exit 1; }
         fi
 
-        ${lib.optionalString enableCri ''
         # --- CRI storage virtiofsd ---
         CRI_NEED_START=1
         if ${pkgs.systemd}/bin/systemctl --user is-active "$CRI_UNIT" &>/dev/null; then
@@ -176,14 +183,14 @@
           done
           [ -S "$CRI_SOCK" ] || { echo "error: cri-storage virtiofsd socket did not appear"; exit 1; }
         fi
-        ''}
 
         # Write host env vars for the VM
-        echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$CLAUDE_DIR/.microvm-env"
-        ${lib.optionalString enableCri ''echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$CLAUDE_DIR/.microvm-env"''}
+        echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$AGENT_DIR/.microvm-env"
+        echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$AGENT_DIR/.microvm-env"
+        ${apiKeyForwarding}
 
         # Pre-cache dev shell environment on host (fast) so the VM doesn't have to evaluate nix
-        _DEVSHELL_CACHE="$CLAUDE_DIR/.microvm-devshell"
+        _DEVSHELL_CACHE="$AGENT_DIR/.microvm-devshell"
         if [ "''${DIRENV_ALLOW:-0}" = "1" ] && [ -f "$WORK/flake.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; then
           _CURRENT_HASH="$( (cat "$WORK/flake.nix" "$WORK/flake.lock" "$WORK/.devenv.flake.nix" "$WORK/devenv.nix" "$WORK/devenv.yaml" "$WORK/devenv.lock" 2>/dev/null || true) | sha256sum | cut -c1-16)"
           _CACHED_HASH=""
@@ -209,12 +216,16 @@
 
         # Build sed arguments for QEMU runner
         _SED_ARGS=(
-          -e "s|/tmp/claude-vm-work|$WORK|g"
-          -e "s|claude-vm-virtiofs-work.sock|$SOCK|g"
-          -e "s|/tmp/claude-vm-home|$CLAUDE_DIR|g"
-          -e "s|claude-vm-virtiofs-claude-home.sock|$CLAUDE_SOCK|g"
-          ${lib.optionalString enableCri ''-e "s|/tmp/claude-vm-cri-storage|$CRI_DIR|g"
-          -e "s|claude-vm-virtiofs-cri-storage.sock|$CRI_SOCK|g"''}
+          # Process and QEMU name: inject project basename
+          -e "s|microvm@${hostname}|microvm@$VM_ID|g"
+          -e "s|-name ${hostname}|-name $VM_ID|g"
+          # Paths and sockets
+          -e "s|/tmp/${hostname}-work|$WORK|g"
+          -e "s|${hostname}-virtiofs-work.sock|$SOCK|g"
+          -e "s|/tmp/${hostname}-home|$AGENT_DIR|g"
+          -e "s|${hostname}-virtiofs-agent-home.sock|$AGENT_SOCK|g"
+          -e "s|/tmp/${hostname}-cri-storage|$CRI_DIR|g"
+          -e "s|${hostname}-virtiofs-cri-storage.sock|$CRI_SOCK|g"
         )
 
         # Run QEMU with corrected paths
@@ -224,13 +235,16 @@
     {
       nixosConfigurations = builtins.listToAttrs (lib.flatten (map (system:
         lib.mapAttrsToList (name: flavor: {
-          name = "claude-vm${flavor.suffix}-${system}";
+          name = "${name}${flavor.suffix}-${system}";
           value = nixpkgs.lib.nixosSystem {
             inherit system;
             modules = [
               microvm.nixosModules.microvm
               ./modules/base.nix
-            ] ++ flavor.extraModules;
+              ./modules/cri.nix
+              { claude-vm.cri.enable = true; }
+              flavor.agentModule
+            ];
           };
         }) vmFlavors
       ) linuxSystems));
@@ -275,10 +289,10 @@
       });
 
       packages = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in
-        { default = self.packages.${system}.vm; } //
+        { default = self.packages.${system}.claude; } //
         builtins.mapAttrs (name: flavor: let
-          runner = self.nixosConfigurations."claude-vm${flavor.suffix}-${system}".config.microvm.runner.qemu;
-        in mkRunnerScript { inherit pkgs runner; inherit (flavor) enableCri; }) vmFlavors
+          runner = self.nixosConfigurations."${name}${flavor.suffix}-${system}".config.microvm.runner.qemu;
+        in mkRunnerScript { inherit pkgs runner; inherit (flavor) dataDirName apiKeyVars; agentName = name; }) vmFlavors
       );
     };
 }
