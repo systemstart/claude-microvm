@@ -18,3 +18,10 @@ jobs:
       - run: nix build --impure .#claude
       - run: nix build --impure .#gemini
       - run: nix build --impure .#codex
+
+  release:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
