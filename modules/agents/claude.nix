@@ -27,11 +27,25 @@ df -h / /nix
 ## Thresholds
 
 - **Low space (<10% free)**: Warn the user immediately. Suggest cleanup:
-  `sudo nix-collect-garbage -d` and `rm -rf /tmp/*`
+  `rm -rf /tmp/*` and check for large files in the overlay upper layer with
+  `du -sh /nix/.rw-store/store`
 - **No space left (0% free or write failures like "No space left on device")**:
   Stop what you are doing and tell the user. Prioritise freeing space before
-  continuing any other work. Run `sudo nix-collect-garbage -d`, clear `/tmp`,
-  and verify space was reclaimed with `df -h`.
+  continuing any other work. Clear `/tmp`, and verify space was reclaimed
+  with `df -h`.
+
+## IMPORTANT: Do NOT run `nix-collect-garbage`
+
+`/nix/store` is an overlayfs over the host's read-only store. Running
+`nix-collect-garbage` does NOT free space — it creates whiteout entries in
+the RAM-backed upper layer for every host store path, which:
+- wastes time (tens of thousands of paths)
+- can fill up the tmpfs with whiteouts
+- breaks Nix by hiding host store paths
+
+To free Nix-related space, only remove paths that were built/installed
+**inside the VM** (they live in `/nix/.rw-store/store` as real files,
+not whiteouts).
 
 Keep this in mind throughout the entire session.
 VMEOF
