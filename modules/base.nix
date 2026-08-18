@@ -52,6 +52,7 @@ in
           source = "/nix/store";
           mountPoint = "/nix/.ro-store";
           proto = "9p";
+          readOnly = true;
         }
         {
           tag = "work";
