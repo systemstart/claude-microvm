@@ -187,7 +187,10 @@
 
         # Pre-cache dev shell environment on host (fast) so the VM doesn't have to evaluate nix
         _DEVSHELL_CACHE="$AGENT_DIR/.microvm-devshell"
-        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && [ -f "$WORK/flake.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; then
+        # The file tests must be grouped: `A && B || C` parses as `(A && B) || C`,
+        # which would run `nix print-dev-env` on the host against an untrusted
+        # $WORK whenever .devenv.flake.nix exists, even with DIRENV_ALLOW unset.
+        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && { [ -f "$WORK/flake.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; }; then
           _CURRENT_HASH="$( (cat "$WORK/flake.nix" "$WORK/flake.lock" "$WORK/.devenv.flake.nix" "$WORK/devenv.nix" "$WORK/devenv.yaml" "$WORK/devenv.lock" 2>/dev/null || true) | sha256sum | cut -c1-16)"
           _CACHED_HASH=""
           [ -f "$_DEVSHELL_CACHE.hash" ] && _CACHED_HASH="$(cat "$_DEVSHELL_CACHE.hash")"
@@ -258,8 +261,12 @@
           # store is a rebuildable cache, so writeback (host page cache) is the
           # portable choice and works on every backing filesystem.
           -e "s|,cache=none|,cache=writeback|g"
-          # Runtime mem/vcpu override (VM_MEM / VM_VCPU env vars)
-          -e "s| -m ${toString defaultMem} | -m $VM_MEM |g"
+          # Runtime mem/vcpu override (VM_MEM / VM_VCPU env vars).
+          # microvm.nix emits `-m <mem>M`, so the M must be part of the pattern:
+          # without it the -m substitution silently misses while the memfd
+          # `size=` below still changes, and QEMU refuses to start with
+          # "total memory for NUMA nodes should equal RAM size".
+          -e "s| -m ${toString defaultMem}M | -m ''${VM_MEM}M |g"
           -e "s| -smp ${toString defaultVcpu} | -smp $VM_VCPU |g"
           -e "s|size=${toString defaultMem}M|size=''${VM_MEM}M|g"
         )

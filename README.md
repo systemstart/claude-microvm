@@ -136,9 +136,30 @@ This mounts the host directory at `/home/agent` inside the guest via a second vi
 
 The VM provides strong isolation from the host:
 
-- **Filesystem** — only `/work` and the home directory are shared; everything else is VM-local and ephemeral
+- **Filesystem** — only `/work` and the home directory are shared read-write; everything else is VM-local and ephemeral
+- **Nix store** — the host's `/nix/store` is shared as the lowerdir of the guest's store overlay, exported `readonly=on` so the guest cannot write through it
 - **Processes** — completely isolated (separate kernel)
 - **Network** — QEMU user-mode NAT; the VM can reach the internet but can't bind host ports
+
+#### Hardening notes
+
+Two things worth knowing before pointing this at code you don't trust:
+
+- **`DIRENV_ALLOW=1` evaluates the work directory's Nix code on the host.** The dev
+  shell cache runs `nix print-dev-env` (or `devenv print-dev-env`) against
+  `$WORK_DIR` *outside* the VM, before boot. Since the guest can write `/work`,
+  a `flake.nix` or `devenv.nix` modified during a session is evaluated on the
+  host on the next launch — a guest-to-host path that needs no kernel bug. Don't
+  combine `DIRENV_ALLOW=1` with a `WORK_DIR` whose contents you wouldn't run on
+  the host yourself.
+- **Unprivileged user namespaces are enabled in the guest** (the NixOS default).
+  That gives an unprivileged guest user namespaced `CAP_NET_ADMIN` and reach into
+  subsystems such as `net/sched`, the entry point for a recurring class of local
+  privilege escalations — i.e. guest root is not far out of reach. The VM boundary
+  is the security boundary here, not the guest's own user separation. Disabling
+  them (`security.allowUserNamespaces = false`) would close it but breaks the Nix
+  sandbox inside the guest, and `security.lockKernelModules` conflicts with
+  `ENABLE_CRI`, so neither is on by default.
 
 ### Shutting down
 
@@ -206,6 +227,8 @@ Rebuild with `make claude`.
 |----------|-------------|---------|
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `AGENT_HOME` | Host directory for agent state (mounted at `/home/agent`) | `$XDG_DATA_HOME/<agent>-microvm/<hash>` |
+| `VM_MEM` | VM memory in MB | `8192` |
+| `VM_VCPU` | VM vCPU count | `4` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
 | `ANTHROPIC_API_KEY` | API key for Claude Code (claude flavor) | — |
