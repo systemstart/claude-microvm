@@ -95,6 +95,19 @@ in
     services.getty.autologinUser = "agent";
     systemd.services."getty@tty1".enable = false;
 
+    # /etc/systemd/system-shutdown is a symlink into the store, and the store's
+    # lower layer is the 9p share, which is torn down before systemd-shutdown
+    # runs its shutdown hooks. The chase then fails against a still-mounted
+    # overlay with a dead lower — EIO, not ENOENT — and systemd logs
+    # "Failed to chase and open directory ... ignoring" on every poweroff.
+    # NixOS creates the entry solely to hold `systemd.shutdown` hooks, so with
+    # none defined it is an empty directory. Drop it: a directory that is
+    # simply absent is skipped silently (conf-files.c only logs when
+    # `r != -ENOENT`). Guarded so that defining a hook restores the entry
+    # rather than silently dropping it on the floor.
+    environment.etc."systemd/system-shutdown".enable =
+      lib.mkIf (config.systemd.shutdown == { }) false;
+
     users.motd = "";
 
     programs.bash.logout = ''
