@@ -143,7 +143,7 @@ The VM provides strong isolation from the host:
 
 #### Hardening notes
 
-Two things worth knowing before pointing this at code you don't trust:
+Three things worth knowing before pointing this at code you don't trust:
 
 - **`DIRENV_ALLOW=1` evaluates the work directory's Nix code on the host.** The dev
   shell cache runs `nix print-dev-env` (or `devenv print-dev-env`) against
@@ -160,6 +160,14 @@ Two things worth knowing before pointing this at code you don't trust:
   them (`security.allowUserNamespaces = false`) would close it but breaks the Nix
   sandbox inside the guest, and `security.lockKernelModules` conflicts with
   `ENABLE_CRI`, so neither is on by default.
+- **On a single-user Nix install, the read-only store share is the only thing
+  protecting the host store.** The `ro-store` share is exported `readOnly`, and on
+  NixOS or a multi-user install the host store is additionally not writable by the
+  user QEMU runs as — a guest write fails on both counts. A single-user install
+  (`/nix` owned by the user who installed Nix) has only the first: QEMU runs as the
+  owner of every store path, who can change their modes at will. Don't remove
+  `readOnly` from that share, and treat store integrity as unprotected if you run
+  the VM as the store's owner with the flag off.
 
 ### Shutting down
 
