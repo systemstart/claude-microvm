@@ -161,11 +161,53 @@
 
         # Write host env vars for the VM
         echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$AGENT_DIR/.microvm-env"
+        # The file carries API keys and whatever EXTRA_ENV forwards, and it
+        # lives in the agent data dir on the host — keep it owner-only.
+        chmod 600 "$AGENT_DIR/.microvm-env"
         echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$AGENT_DIR/.microvm-env"
         # %q produces a single-quoted/escaped form that survives `source`
         # so values like AGENTS_ARGS='-p "hi there"' round-trip intact.
         printf 'AGENTS_ARGS=%q\n' "''${AGENTS_ARGS:-}" >> "$AGENT_DIR/.microvm-env"
         ${apiKeyForwarding}
+
+        # Forward arbitrary host env vars into the guest, comma-separated:
+        #   EXTRA_ENV="FOO=bar,HTTPS_PROXY"
+        # An entry containing '=' is a literal assignment; a bare name forwards
+        # that variable's value from the host environment, which keeps secrets
+        # off the command line (where `ps` exposes them) and out of shell
+        # history. Written last, so an entry here overrides an earlier key.
+        if [ -n "''${EXTRA_ENV:-}" ]; then
+          _OLD_IFS="$IFS"
+          IFS=','
+          read -r -a _EXTRA_ENV_ENTRIES <<< "$EXTRA_ENV"
+          IFS="$_OLD_IFS"
+          for _entry in ''${_EXTRA_ENV_ENTRIES+"''${_EXTRA_ENV_ENTRIES[@]}"}; do
+            # `read` into a single variable strips surrounding whitespace, so
+            # "FOO=1, BAR=2 , BAZ" forwards BAR as "2", not "2 ". Whitespace
+            # inside a value is preserved.
+            read -r _entry <<< "$_entry" || true
+            [ -z "$_entry" ] && continue
+            # Split on the first '=' — everything after it is the value, so
+            # values may contain '=' themselves.
+            _name="''${_entry%%=*}"
+            if ! [[ "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "warning: EXTRA_ENV: invalid variable name '$_name', skipping"
+              continue
+            fi
+            if [[ "$_entry" != *=* ]]; then
+              if [ -z "''${!_name+set}" ]; then
+                echo "warning: EXTRA_ENV: $_name is not set on the host, skipping"
+                continue
+              fi
+              _value="''${!_name}"
+            else
+              _value="''${_entry#*=}"
+            fi
+            # %q again: the guest sources this file, so an unescaped value
+            # would be executable code, not data.
+            printf '%s=%q\n' "$_name" "$_value" >> "$AGENT_DIR/.microvm-env"
+          done
+        fi
 
         # Copy custom CA certificates into agent home for the VM
         if [ -n "''${EXTRA_CA_CERTS:-}" ]; then

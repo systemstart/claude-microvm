@@ -157,7 +157,14 @@ in
       ${cfg.shellInit}
 
       cd /work 2>/dev/null || true
-      [ -f ~/.microvm-env ] && source ~/.microvm-env
+      # `set -a` so these are exported, not just set as shell variables: the
+      # agent runs as a child process below and would not otherwise inherit
+      # API keys or anything forwarded via EXTRA_ENV.
+      if [ -f ~/.microvm-env ]; then
+        set -a
+        source ~/.microvm-env
+        set +a
+      fi
       if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
         if [ -f ~/.microvm-devshell ] && [ -s ~/.microvm-devshell ]; then
           echo "loading dev environment..."

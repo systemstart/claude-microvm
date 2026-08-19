@@ -195,6 +195,39 @@ EXTRA_CA_CERTS=/path/to/certs/ make claude.run
 
 The custom certificates are appended to the system CA bundle at boot, before the agent starts. All tools (curl, git, Nix, etc.) will trust servers signed by the custom CA.
 
+### Extra environment variables
+
+`EXTRA_ENV` forwards arbitrary environment variables into the guest, where they
+are exported into the agent's environment. Entries are comma-separated:
+
+```sh
+# Literal assignment
+EXTRA_ENV="LANG=de_DE.UTF-8,TZ=Europe/Berlin" make claude.run
+
+# A bare name forwards that variable's value from the host environment
+export HTTPS_PROXY=http://proxy.internal:3128
+EXTRA_ENV="HTTPS_PROXY" make claude.run
+
+# Mix both
+EXTRA_ENV="HTTPS_PROXY,LOG_LEVEL=debug" make claude.run
+```
+
+Prefer the bare-name form for secrets: the value never appears on the command
+line, where `ps` would expose it to other users on the host, nor in shell
+history.
+
+Values may contain `=` (only the first one splits), but **not** commas — those
+always separate entries. Whitespace around an entry is trimmed. Invalid variable
+names and bare names that aren't set on the host are skipped with a warning.
+
+Because agent config files live in the agent home directory (host-provided) and
+can interpolate environment variables, this is also the way to point an agent at
+a private or self-hosted endpoint — the token stays on the host and nothing
+endpoint-specific is baked into the image.
+
+> Values are written to `.microvm-env` (mode `600`) in the agent home directory
+> and are readable by anything running in the guest, including the agent itself.
+
 ## Customization
 
 ### Exposing ports
@@ -235,6 +268,7 @@ Rebuild with `make claude`.
 | `GEMINI_API_KEY` | API key for Gemini CLI (gemini flavor) | — |
 | `OPENAI_API_KEY` | API key for Codex CLI (codex flavor) and Pi (pi flavor) | — |
 | `EXTRA_CA_CERTS` | Path to a PEM file or directory of PEM files containing custom CA certificates to trust inside the VM | (system CAs only) |
+| `EXTRA_ENV` | Extra environment variables to forward into the VM, comma-separated. `FOO=bar` assigns a literal value; a bare `FOO` forwards `$FOO` from the host environment (keeps secrets off the command line). | (none) |
 | `AGENTS_ARGS` | Extra arguments appended to the agent launch command. Use for one-shot prompts (e.g. `'-p "summarize this repo"'`) or to enable dangerous flags (e.g. `--dangerously-skip-permissions`). Re-parsed via `eval`, so quoting works. | (none) |
 
 ### Container runtime support
