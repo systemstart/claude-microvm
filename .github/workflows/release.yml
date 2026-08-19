@@ -30,4 +30,28 @@ jobs:
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" --generate-notes
+        run: |
+          TAG="${{ github.ref_name }}"
+          PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+
+          # 1. Hand-written notes: the body of the annotated tag, written by `make release-tag`.
+          #    The sed guard drops a trailing signature block; release tags are signed
+          #    (tag.forcesignannotated), and it must not end up in the release body.
+          git tag -l --format='%(contents:body)' "$TAG" \
+            | sed '/^-----BEGIN \(PGP\|SSH\) SIGNATURE-----/,$d' > notes.md
+
+          # 2. GitHub's own generated notes — merged PRs and new contributors.
+          GEN_ARGS=(-f tag_name="$TAG")
+          [ -n "$PREV" ] && GEN_ARGS+=(-f previous_tag_name="$PREV")
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${GEN_ARGS[@]}" --jq .body >> notes.md
+
+          # 3. Every commit in the range. Step 2 lists only merged PRs, so anything
+          #    pushed straight to main — including security fixes — is absent there.
+          {
+            printf '\n<details><summary>All commits</summary>\n\n'
+            git log --no-merges --pretty='* %s (`%h`)' ${PREV:+"$PREV.."}"$TAG"
+            printf '\n</details>\n'
+          } >> notes.md
+
+          cat notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md

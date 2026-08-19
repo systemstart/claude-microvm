@@ -31,7 +31,29 @@ pi:
 pi.run: pi
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
 
+# The annotated tag's body becomes the release notes (see .github/workflows/release.yml),
+# so it is written here, before the tag is pushed — not patched into the release after.
+#   make release-tag                        opens $EDITOR, prefilled with the subject line
+#   make release-tag NOTES=notes.md         takes the body from a file
+#   make release-tag MESSAGE="..."          takes the body from the command line
 release-tag:
-	$(eval VERSION ?= $(shell gsemver bump))
-	git tag -a "v$(VERSION)" -m "Release v$(VERSION)"
-	git push origin "v$(VERSION)"
+	@set -e; \
+	VERSION="$(VERSION)"; \
+	[ -n "$$VERSION" ] || VERSION="$$(gsemver bump)"; \
+	if [ -n "$(NOTES)" ]; then \
+	  BODY="$(NOTES)"; \
+	else \
+	  BODY="$$(mktemp)"; \
+	  trap 'rm -f "$$BODY"' EXIT; \
+	  if [ -n "$(MESSAGE)" ]; then \
+	    printf '%s\n' "$(MESSAGE)" > "$$BODY"; \
+	  else \
+	    $${EDITOR:-vi} "$$BODY"; \
+	  fi; \
+	fi; \
+	if ! grep -q '[^[:space:]]' "$$BODY" 2>/dev/null; then \
+	  echo "error: release notes are empty — tag not created" >&2; exit 1; \
+	fi; \
+	{ echo "Release v$$VERSION"; echo; cat "$$BODY"; } \
+	  | git tag -a "v$$VERSION" --cleanup=verbatim -F -; \
+	git push origin "v$$VERSION"
