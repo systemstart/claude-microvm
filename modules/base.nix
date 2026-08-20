@@ -1,6 +1,43 @@
 { pkgs, lib, config, ... }:
 let
   cfg = config.claude-vm.agent;
+
+  # tc classifiers and actions, blocked from on-demand autoload below.
+  #
+  # Only modules that still exist upstream are listed: cls_tcindex, cls_rsvp
+  # and cls_route were retired from the kernel (6.3 and later), so entries for
+  # them would be inert on any kernel this runs on.
+  #
+  # Qdiscs (sch_*) are deliberately absent, and so is ifb.
+  blockedTcModules = [
+    "cls_u32"
+    "cls_fw"
+    "cls_basic"
+    "cls_flow"
+    "cls_cgroup"
+    "cls_flower"
+    "cls_matchall"
+    "cls_bpf"
+    "act_pedit"
+    "act_mirred"
+    "act_police"
+    "act_gact"
+    "act_bpf"
+    "act_connmark"
+    "act_csum"
+    "act_ct"
+    "act_ctinfo"
+    "act_ife"
+    "act_mpls"
+    "act_nat"
+    "act_sample"
+    "act_simple"
+    "act_skbedit"
+    "act_skbmod"
+    "act_tunnel_key"
+    "act_vlan"
+    "act_gate"
+  ];
 in
 {
   options.claude-vm.agent = {
@@ -91,6 +128,37 @@ in
     };
 
     boot.kernelParams = [ "console=hvc0" ];
+
+    # Block on-demand autoload of tc classifiers and actions.
+    #
+    # Unprivileged user namespaces stay enabled (see the hardening notes in the
+    # README), so an unprivileged guest user holds namespaced CAP_NET_ADMIN and
+    # can reach net/sched. Loading is what makes that reach useful: the kernel
+    # pulls these in on first use via request_module(), so a guest that never
+    # legitimately touches tc can still fault in a classifier or action and
+    # attack it. Refusing the load closes the route as a category rather than
+    # one CVE at a time.
+    #
+    # `install <mod> /bin/false` rather than boot.blacklistedKernelModules: the
+    # latter emits nothing but `blacklist <name>` lines, which suppress
+    # alias-based loading but not a request by real name. cls_api.c and
+    # act_api.c ask through request_module("cls_%s") / ("act_%s") with the
+    # literal name, which a blacklist line does not stop. Please don't
+    # "simplify" this back.
+    #
+    # Nothing in the default CNI chain (bridge + portmap + firewall) uses tc,
+    # so this is inert for ENABLE_CRI as shipped. It is compatible with
+    # container runtimes in a way security.lockKernelModules is not, since that
+    # sets kernel.modules_disabled=1 and blocks the on-demand loads CNI does
+    # need.
+    #
+    # If you add the `bandwidth` plugin to the chain, drop act_mirred and
+    # cls_u32 from the list: its egressRate path attaches a u32 filter carrying
+    # a mirred TCA_EGRESS_REDIR action to redirect into an ifb device (see
+    # CreateEgressQdisc in plugins/meta/bandwidth/ifb_creator.go upstream). Its
+    # ingressRate path only needs sch_tbf and is unaffected.
+    boot.extraModprobeConfig =
+      lib.concatMapStrings (m: "install ${m} /bin/false\n") blockedTcModules;
 
     services.getty.autologinUser = "agent";
     systemd.services."getty@tty1".enable = false;
