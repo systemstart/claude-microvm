@@ -41,7 +41,7 @@
         pi     = { suffix = "-pi";    agentModule = ./modules/agents/pi.nix;    dataDirName = "pi-microvm";    apiKeyVars = [ "ANTHROPIC_API_KEY" "OPENAI_API_KEY" "GEMINI_API_KEY" ]; };
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, defaultMem, defaultVcpu }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, defaultMem, defaultVcpu, defaultCriSize }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -53,6 +53,7 @@
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         VM_MEM="''${VM_MEM:-${toString defaultMem}}"
         VM_VCPU="''${VM_VCPU:-${toString defaultVcpu}}"
+        CRI_STORAGE_SIZE="''${CRI_STORAGE_SIZE:-${toString defaultCriSize}}"
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         ID="$(cat /proc/sys/kernel/random/uuid)"
 
@@ -316,6 +317,12 @@
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.
           -e "s|cri-storage.img|$_CRI_IMG_ESC|g"
+          # CRI storage volume size (CRI_STORAGE_SIZE env var, MiB). microvm.nix
+          # emits `truncate -s <size>M` inside an `[ ! -e <image> ]` guard, so
+          # this sizes a freshly created image only: an existing one keeps the
+          # size it was made with, and growing it means resize2fs or deleting
+          # the image (see README "Container runtime support").
+          -e "s|truncate -s ${toString defaultCriSize}M|truncate -s ''${CRI_STORAGE_SIZE}M|g"
           # microvm.nix unconditionally sets cache=none (O_DIRECT) on volume
           # drives, which fails when agent home is on a filesystem without
           # O_DIRECT support (tmpfs, some network/virtiofs mounts). The CRI
@@ -403,6 +410,7 @@
           agentName = name;
           defaultMem = nixosCfg.claude-vm.agent.mem;
           defaultVcpu = nixosCfg.claude-vm.agent.vcpu;
+          defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
         }) vmFlavors
       );
     };

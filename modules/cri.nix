@@ -3,7 +3,21 @@ let
   cfg = config.claude-vm.cri;
 in
 {
-  options.claude-vm.cri.enable = lib.mkEnableOption "container runtime support";
+  options.claude-vm.cri = {
+    enable = lib.mkEnableOption "container runtime support";
+
+    storageSize = lib.mkOption {
+      type = lib.types.int;
+      default = 30720;
+      description = ''
+        Maximum size of the CRI storage volume in MiB. The image is sparse, so
+        this is a cap rather than an allocation: it consumes only what is
+        actually written. Overridable at runtime via the CRI_STORAGE_SIZE env
+        var, which applies to a freshly created image only — see README
+        "Container runtime support".
+      '';
+    };
+  };
 
   config = lib.mkIf cfg.enable {
     microvm.mem = lib.mkDefault 8192;
@@ -49,7 +63,9 @@ CRIEOF
         image = "cri-storage.img";
         label = "cri-storage";
         mountPoint = "/var/lib/containers";
-        size = 30720; # MiB, sparse — max size, only consumes what is used
+        # Sparse: a cap, not an allocation. The runner rewrites the generated
+        # `truncate -s <size>M` when CRI_STORAGE_SIZE is set (see flake.nix).
+        size = cfg.storageSize;
         fsType = "ext4";
       }
     ];

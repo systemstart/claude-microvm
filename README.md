@@ -353,6 +353,7 @@ Rebuild with `make claude`.
 | `VM_VCPU` | VM vCPU count | `4` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
+| `CRI_STORAGE_SIZE` | Cap on the CRI storage disk in MiB. Sparse, so it is a ceiling rather than an allocation. Applies when the image is first created only — see [Container runtime support](#container-runtime-support) | `30720` (30 GiB) |
 | `ANTHROPIC_API_KEY` | API key for Claude Code (claude flavor) | — |
 | `GEMINI_API_KEY` | API key for Gemini CLI (gemini flavor) | — |
 | `OPENAI_API_KEY` | API key for Codex CLI (codex flavor) and Pi (pi flavor) | — |
@@ -382,6 +383,40 @@ ENABLE_CRI=podman make claude.run
 ```
 
 Container images and layers are stored on a dedicated ext4 disk image at `$AGENT_HOME-cri/cri-storage.img` (sparse, up to 30 GiB), mounted at `/var/lib/containers`, so they persist across VM restarts and don't consume the VM's RAM-backed root filesystem. The image is kept in a host-only sibling directory next to agent home rather than inside it, so it is never exported through the agent-home virtiofs share and the guest cannot read or tamper with its own raw storage backing file. A real block-backed filesystem is required here rather than a virtiofs share: image unpack must `lchown` extracted layers to UID 0, which the host's rootless virtiofsd cannot do (it has a single-ID uid map). On a share, `docker info` reports `Backing Filesystem: fuse` and overlay2/KinD layer extraction fails with `lchown … operation not permitted`; on the ext4 volume it reports `extfs` and works.
+
+#### Sizing the CRI disk
+
+The 30 GiB default is a cap on a sparse image: it costs host space only as it is
+written. Raise it with `CRI_STORAGE_SIZE` (MiB) when you know the workload is
+heavy:
+
+```sh
+# 60 GiB ceiling for a KinD cluster plus fixtures
+CRI_STORAGE_SIZE=61440 ENABLE_CRI=docker,containerd make claude.run
+```
+
+Budget generously for Kubernetes-in-Docker. A single-node KinD cluster typically
+occupies **15–25 GiB** of this disk, because every image `kind load`ed into the
+node is stored a second time inside the node's own containerd — the copy in the
+host Nix store does not help. One cluster can therefore fill most of the default
+disk on its own, and it competes for that space with any host-side containerd or
+Docker images, which share the same filesystem.
+
+The size takes effect **when the image is created**. An existing
+`$AGENT_HOME-cri/cri-storage.img` keeps the size it was made with, so to change
+it either grow it in place while the VM is shut down:
+
+```sh
+truncate -s 61440M "$AGENT_HOME-cri/cri-storage.img"
+e2fsck -f "$AGENT_HOME-cri/cri-storage.img"
+resize2fs "$AGENT_HOME-cri/cri-storage.img"
+```
+
+or delete the image and let the next run recreate it. Deleting discards
+everything on it — not just cached image layers but the state of any KinD
+cluster or named volume living there — so prefer the in-place grow unless you
+want a clean slate.
+
 
 #### Available runtimes
 
