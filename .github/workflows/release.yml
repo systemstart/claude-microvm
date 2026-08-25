@@ -30,8 +30,11 @@ jobs:
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed as an env var, not interpolated into the script: git ref names
+          # may contain `;`, `$`, backticks and `|`, so `${{ }}` inside `run:`
+          # would let a crafted tag name execute in a job holding a write token.
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
           PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
 
           # 1. Hand-written notes: the body of the annotated tag, written by `make release-tag`.

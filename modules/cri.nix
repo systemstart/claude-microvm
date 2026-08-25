@@ -218,6 +218,14 @@ CRIEOF
       after = [ "network.target" "var-lib-containers.mount" ];
       wants = [ "network.target" ];
       wantedBy = [ ];
+      # containerd-shim-runc-v2 resolves the OCI runtime by PATH lookup unless the
+      # runtime options carry an absolute BinaryName. The CRI plugin sets one (see
+      # config.toml above), but the moby namespace does not: when dockerd finds this
+      # containerd already running it attaches instead of starting its own, and its
+      # containers then die with `exec: "runc": executable file not found in $PATH`.
+      # Same for `ctr` and rootful nerdctl in the default namespace. See
+      # docs/CRI-GOTCHAS.md.
+      path = [ pkgs.runc pkgs.crun ];
       serviceConfig = {
         ExecStart = "${pkgs.containerd}/bin/containerd --config /etc/containerd/config.toml";
         Restart = "always";
@@ -237,6 +245,9 @@ CRIEOF
       after = [ "network.target" "var-lib-containers.mount" ];
       wants = [ "network.target" ];
       wantedBy = [ ];
+      # Same shim PATH gap as above — its CRI runtime pins crun absolutely, but any
+      # other namespace on this socket would fall back to a PATH lookup.
+      path = [ pkgs.runc pkgs.crun ];
       serviceConfig = {
         ExecStart = "${pkgs.containerd}/bin/containerd --config /etc/containerd/config-crun.toml";
         Restart = "always";
