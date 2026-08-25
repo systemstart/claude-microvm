@@ -33,7 +33,8 @@ pi.run: pi
 
 # The annotated tag's body becomes the release notes (see .github/workflows/release.yml),
 # so it is written here, before the tag is pushed — not patched into the release after.
-#   make release-tag                        opens $EDITOR, prefilled with the subject line
+#   make release-tag                        changelog from Conventional Commit subjects
+#   make release-tag EDIT=1                 same, but review it in $EDITOR first
 #   make release-tag NOTES=notes.md         takes the body from a file
 #   make release-tag MESSAGE="..."          takes the body from the command line
 release-tag:
@@ -48,7 +49,8 @@ release-tag:
 	  if [ -n "$(MESSAGE)" ]; then \
 	    printf '%s\n' "$(MESSAGE)" > "$$BODY"; \
 	  else \
-	    $${EDITOR:-vi} "$$BODY"; \
+	    ./scripts/changelog.sh > "$$BODY"; \
+	    [ -z "$(EDIT)" ] || $${EDITOR:-vi} "$$BODY"; \
 	  fi; \
 	fi; \
 	if ! grep -q '[^[:space:]]' "$$BODY" 2>/dev/null; then \

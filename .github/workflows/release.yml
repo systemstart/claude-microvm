@@ -41,7 +41,9 @@ jobs:
         run: |
           PREV="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
 
-          # 1. Hand-written notes: the body of the annotated tag, written by `make release-tag`.
+          # 1. The changelog: the body of the annotated tag, generated from Conventional
+          #    Commit subjects by `make release-tag` (scripts/changelog.sh). It covers
+          #    every commit in the range, including anything pushed straight to main.
           #    The sed guard drops a trailing signature block; release tags are signed
           #    (tag.forcesignannotated), and it must not end up in the release body.
           git tag -l --format='%(contents:body)' "$TAG" \
@@ -51,14 +53,6 @@ jobs:
           GEN_ARGS=(-f tag_name="$TAG")
           [ -n "$PREV" ] && GEN_ARGS+=(-f previous_tag_name="$PREV")
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${GEN_ARGS[@]}" --jq .body >> notes.md
-
-          # 3. Every commit in the range. Step 2 lists only merged PRs, so anything
-          #    pushed straight to main — including security fixes — is absent there.
-          {
-            printf '\n<details><summary>All commits</summary>\n\n'
-            git log --no-merges --pretty='* %s (`%h`)' ${PREV:+"$PREV.."}"$TAG"
-            printf '\n</details>\n'
-          } >> notes.md
 
           cat notes.md
           gh release create "$TAG" --title "$TAG" --notes-file notes.md
