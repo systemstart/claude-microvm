@@ -2,3 +2,6 @@ result
 .envrc
 .direnv
 
+# QEMU control socket: microvm.socket defaults to a relative "<hostname>.sock",
+# so it is created in the directory you launch the VM from.
+*-vm.sock

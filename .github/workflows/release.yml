@@ -23,6 +23,10 @@ jobs:
           name: systemstart
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
+          # Upstream microvm.nix CI publishes the QEMU variant our runner needs
+          # (see README "Binary caches"); pulling it here avoids a ~20 min
+          # source build after a flake.lock bump when the pins line up.
+          extraPullNames: microvm
       - run: nix build --impure .#claude
       - run: nix build --impure .#gemini
       - run: nix build --impure .#codex

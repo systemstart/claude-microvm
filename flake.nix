@@ -1,6 +1,25 @@
 {
   description = "Claude Code microVM";
 
+  # microvm.nix's `optimize.enable` builds QEMU as
+  # qemu_kvm.override { nixosTestRunner = true; } — a hostCpuOnly +
+  # nixosTestRunner combination that Hydra stopped building when nixpkgs
+  # dropped hostCpuOnly from qemu_test (NixOS/nixpkgs#541354, 2026-07-21).
+  # It is absent from cache.nixos.org, so without these caches every user
+  # compiles QEMU from source (~20 min) after each flake.lock bump.
+  # See README "Binary caches" — these are opt-in; Nix ignores them (or
+  # prompts) unless you are a trusted user.
+  nixConfig = {
+    extra-substituters = [
+      "https://systemstart.cachix.org"
+      "https://microvm.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
+      "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     microvm = {

@@ -9,6 +9,87 @@ The agent starts automatically on boot. Exiting the agent shuts down the VM.
 - [Nix](https://nixos.org/) with flakes enabled
 - KVM support (`/dev/kvm`)
 
+## Binary caches (optional — 20 min build vs. trusting a third-party cache)
+
+microvm.nix builds QEMU as `qemu_kvm.override { nixosTestRunner = true; }` (its
+`microvm.optimize.enable` default, which keeps the QEMU closure at ~845 MiB
+instead of ~1.5 GiB). Since nixpkgs dropped `hostCpuOnly` from `qemu_test`
+([NixOS/nixpkgs#541354](https://github.com/NixOS/nixpkgs/pull/541354), merged
+2026-07-21) that exact combination is no longer built by Hydra, so it is **not
+in `cache.nixos.org`**. Building it from source takes roughly 20 minutes, and it
+recurs after every `flake.lock` bump that moves QEMU or its dependencies — not
+just on first use.
+
+Two caches serve the prebuilt QEMU (~35 MiB download), and `flake.nix` declares
+both in `nixConfig`:
+
+| Cache | Who signs it | Populated by |
+|-------|--------------|--------------|
+| `systemstart.cachix.org` | this project | every CI build of `.#claude`/`.#gemini`/`.#codex`/`.#pi` |
+| `microvm.cachix.org` | upstream [microvm.nix](https://github.com/microvm-nix/microvm.nix) | upstream CI (hits only when its nixpkgs pin matches ours) |
+
+Substituters are a trust decision: a cache you enable can hand you any build
+output it likes, signed with its own key. Pick whichever you prefer.
+
+**Use the caches.** `nix build`/`nix run` (and `direnv reload`, via
+`nix print-dev-env`) prompts once per setting, then offers to remember the
+answer in `~/.local/share/nix/trusted-settings.json` — per user, keyed by the
+exact value, not per repo:
+
+```
+do you want to allow configuration setting 'extra-substituters' to be set to
+'https://systemstart.cachix.org https://microvm.cachix.org' (y/N)?
+```
+
+**Answering the prompts is not enough on a multi-user install.** `substituters`
+and `trusted-public-keys` are *restricted settings*: the client hands them to
+`nix-daemon`, which drops them unless you are listed in `trusted-users`. Both
+gates are independent, so accepting the flake config and still getting no cache
+looks like this:
+
+```
+do you want to permanently mark this value as trusted (y/N)? y
+warning: ignoring untrusted substituter 'https://systemstart.cachix.org', you are not a trusted user.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+```
+
+The fix is daemon-side. Configure the caches system-wide — the narrower grant,
+and it works no matter who runs the build:
+
+```nix
+# NixOS
+nix.settings = {
+  substituters = [ "https://systemstart.cachix.org" "https://microvm.cachix.org" ];
+  trusted-public-keys = [
+    "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
+    "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
+  ];
+};
+```
+
+```conf
+# non-NixOS: /etc/nix/nix.conf
+extra-substituters = https://systemstart.cachix.org https://microvm.cachix.org
+extra-trusted-public-keys = systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE= microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
+```
+
+Restart the daemon afterwards (`systemctl restart nix-daemon`, or
+`sudo launchctl kickstart -k system/org.nixos.nix-daemon` on macOS).
+
+Adding yourself to `trusted-users` instead makes the flake's `nixConfig` work
+directly, but that grant is effectively root-equivalent — a trusted user can
+inject arbitrary paths into the store. Prefer the system-wide cache config above
+unless you already trust yourself that far.
+
+**Build it yourself.** Answer `N` at the prompt, or pass
+`--no-accept-flake-config`, and Nix compiles QEMU from source. Everything else
+still comes from `cache.nixos.org` — only QEMU is affected.
+
+If you would rather never build QEMU *and* never add a third-party cache, set
+`microvm.qemu.package = pkgs.qemu_test;` in `modules/base.nix`: that variant is
+in `cache.nixos.org`, at the cost of ~575 MiB more closure (it carries every
+target architecture, not just the host's).
+
 ## Flavors
 
 Each flavor packages a different AI coding agent. The VM is built as composable NixOS modules under `modules/`:
