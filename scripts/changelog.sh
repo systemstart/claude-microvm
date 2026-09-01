@@ -18,7 +18,7 @@ if [ -z "$range" ]; then
   range="${prev:+$prev..}HEAD"
 fi
 
-breaking=() feats=() fixes=() docs=() other=()
+breaking=() security=() feats=() fixes=() docs=() other=()
 
 # Records are \x1e-separated and fields \x1f-separated: commit bodies are
 # multi-line, so a plain line-oriented read would split them across records.
@@ -42,6 +42,8 @@ while IFS= read -r -d $'\x1e' record; do
     breaking+=("$entry")
   else
     case "$type" in
+      harden|sec|security)
+                  security+=("$entry") ;;
       feat)       feats+=("$entry") ;;
       fix)        fixes+=("$entry") ;;
       docs)       docs+=("$entry")  ;;
@@ -59,6 +61,7 @@ section() {
 }
 
 section "Breaking changes" ${breaking+"${breaking[@]}"}
+section "Security"         ${security+"${security[@]}"}
 section "Features"         ${feats+"${feats[@]}"}
 section "Fixes"            ${fixes+"${fixes[@]}"}
 section "Documentation"    ${docs+"${docs[@]}"}
