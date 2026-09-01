@@ -241,7 +241,7 @@ Three things worth knowing before pointing this at code you don't trust:
   them (`security.allowUserNamespaces = false`) would close it but breaks the Nix
   sandbox inside the guest, and `security.lockKernelModules` conflicts with
   `ENABLE_CRI`, so neither is on by default. What the guest does do is refuse the
-  on-demand autoload of the classifiers and actions listed in
+  on-demand autoload of the `net/sched` modules listed in
   `blockedTcModules` in `modules/base.nix`, which removes the most travelled
   route into `net/sched` without the `lockKernelModules` conflict. This is
   guest-internal defence in depth: `modprobe.d` constrains modprobe-mediated

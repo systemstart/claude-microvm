@@ -15,7 +15,7 @@ let
   # and modprobe applies `install` after alias resolution, so listing them would
   # take effect. They are omitted because they are only reachable through
   # cls_basic / cls_flow and act_ife, which are blocked here already. If any of
-  # those three ever comes off the list, add the matching em_* / act_meta_*
+  # those ever comes off the list, add the matching em_* / act_meta_*
   # entries.
   blockedTcFilters = [
     "cls_u32"
@@ -48,7 +48,37 @@ let
     "act_gate"
   ];
 
-  blockedTcModules = blockedTcFilters;
+  # Queueing disciplines, same treatment. Blocking the filters while leaving
+  # every sch_* faultable would leave the larger half of net/sched open, and the
+  # qdisc side has been at least as productive for local privilege escalation
+  # as the action side — sch_qfq alone accounts for CVE-2023-4921 and
+  # CVE-2023-31436.
+  #
+  # Only the exotic ones are listed. These are deliberately left loadable
+  # because they are actually used:
+  #
+  #   sch_tbf               — the CNI `bandwidth` plugin's ingressRate path
+  #   sch_ingress           — also provides clsact, which container networking
+  #                           and any tc-BPF attachment needs; the stronger
+  #                           reason it must stay loadable
+  #   sch_fq_codel          — net.core.default_qdisc, loaded on every boot and
+  #                           the only sched module live on a default guest
+  #
+  # All of them were present and modular on 6.18.45; none is reachable in
+  # normal use of this VM.
+  blockedTcQdiscs = [
+    "sch_qfq"
+    "sch_choke"
+    "sch_teql"
+    "sch_dualpi2"
+    "sch_cbs"
+    "sch_taprio"
+    "sch_etf"
+    "sch_plug"
+    "sch_skbprio"
+  ];
+
+  blockedTcModules = blockedTcFilters ++ blockedTcQdiscs;
 in
 {
   options.claude-vm.agent = {
@@ -140,7 +170,8 @@ in
 
     boot.kernelParams = [ "console=hvc0" ];
 
-    # Block on-demand autoload of tc classifiers and actions.
+    # Block on-demand autoload of tc classifiers, actions and the exotic
+    # queueing disciplines.
     #
     # Unprivileged user namespaces stay enabled (see the hardening notes in the
     # README), so an unprivileged guest user holds namespaced CAP_NET_ADMIN and
