@@ -413,5 +413,14 @@
           defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
         }) vmFlavors
       );
+
+      # Picked up by the `nix flake check --impure` already in CI, so these run
+      # without any workflow change. nixosTest boots a VM and drives it as root,
+      # which is the only way to exercise guest hardening: inside a live
+      # claude-vm the agent user is denied sudo, and the host-side launch path
+      # is not reachable from in there at all.
+      checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
+        module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+      });
     };
 }
