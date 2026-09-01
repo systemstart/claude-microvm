@@ -240,7 +240,15 @@ Three things worth knowing before pointing this at code you don't trust:
   is the security boundary here, not the guest's own user separation. Disabling
   them (`security.allowUserNamespaces = false`) would close it but breaks the Nix
   sandbox inside the guest, and `security.lockKernelModules` conflicts with
-  `ENABLE_CRI`, so neither is on by default.
+  `ENABLE_CRI`, so neither is on by default. What the guest does do is refuse the
+  on-demand autoload of the classifiers and actions listed in
+  `blockedTcModules` in `modules/base.nix`, which removes the most travelled
+  route into `net/sched` without the `lockKernelModules` conflict. This is
+  guest-internal defence in depth: `modprobe.d` constrains modprobe-mediated
+  loads, not a direct `finit_module` from something already privileged in the
+  guest. It narrows the path to guest root; it does not close it, and the VM
+  remains the security boundary. If you add the CNI `bandwidth` plugin to the
+  chain, drop `act_mirred` and `cls_u32` from the list.
 - **On a single-user Nix install, the read-only store share is the only thing
   protecting the host store.** The `ro-store` share is exported `readOnly`, and on
   NixOS or a multi-user install the host store is additionally not writable by the
