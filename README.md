@@ -4,91 +4,16 @@ Run AI coding agents in isolated NixOS microVMs via [microvm.nix](https://github
 
 The agent starts automatically on boot. Exiting the agent shuts down the VM.
 
-## Prerequisites
+## Features
 
-- [Nix](https://nixos.org/) with flakes enabled
-- KVM support (`/dev/kvm`)
-
-## Binary caches (optional — 20 min build vs. trusting a third-party cache)
-
-microvm.nix builds QEMU as `qemu_kvm.override { nixosTestRunner = true; }` (its
-`microvm.optimize.enable` default, which keeps the QEMU closure at ~845 MiB
-instead of ~1.5 GiB). Since nixpkgs dropped `hostCpuOnly` from `qemu_test`
-([NixOS/nixpkgs#541354](https://github.com/NixOS/nixpkgs/pull/541354), merged
-2026-07-21) that exact combination is no longer built by Hydra, so it is **not
-in `cache.nixos.org`**. Building it from source takes roughly 20 minutes, and it
-recurs after every `flake.lock` bump that moves QEMU or its dependencies — not
-just on first use.
-
-Two caches serve the prebuilt QEMU (~35 MiB download), and `flake.nix` declares
-both in `nixConfig`:
-
-| Cache | Who signs it | Populated by |
-|-------|--------------|--------------|
-| `systemstart.cachix.org` | this project | every CI build of `.#claude`/`.#gemini`/`.#codex`/`.#pi` |
-| `microvm.cachix.org` | upstream [microvm.nix](https://github.com/microvm-nix/microvm.nix) | upstream CI (hits only when its nixpkgs pin matches ours) |
-
-Substituters are a trust decision: a cache you enable can hand you any build
-output it likes, signed with its own key. Pick whichever you prefer.
-
-**Use the caches.** `nix build`/`nix run` (and `direnv reload`, via
-`nix print-dev-env`) prompts once per setting, then offers to remember the
-answer in `~/.local/share/nix/trusted-settings.json` — per user, keyed by the
-exact value, not per repo:
-
-```
-do you want to allow configuration setting 'extra-substituters' to be set to
-'https://systemstart.cachix.org https://microvm.cachix.org' (y/N)?
-```
-
-**Answering the prompts is not enough on a multi-user install.** `substituters`
-and `trusted-public-keys` are *restricted settings*: the client hands them to
-`nix-daemon`, which drops them unless you are listed in `trusted-users`. Both
-gates are independent, so accepting the flake config and still getting no cache
-looks like this:
-
-```
-do you want to permanently mark this value as trusted (y/N)? y
-warning: ignoring untrusted substituter 'https://systemstart.cachix.org', you are not a trusted user.
-warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
-```
-
-The fix is daemon-side. Configure the caches system-wide — the narrower grant,
-and it works no matter who runs the build:
-
-```nix
-# NixOS
-nix.settings = {
-  substituters = [ "https://systemstart.cachix.org" "https://microvm.cachix.org" ];
-  trusted-public-keys = [
-    "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
-    "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
-  ];
-};
-```
-
-```conf
-# non-NixOS: /etc/nix/nix.conf
-extra-substituters = https://systemstart.cachix.org https://microvm.cachix.org
-extra-trusted-public-keys = systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE= microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
-```
-
-Restart the daemon afterwards (`systemctl restart nix-daemon`, or
-`sudo launchctl kickstart -k system/org.nixos.nix-daemon` on macOS).
-
-Adding yourself to `trusted-users` instead makes the flake's `nixConfig` work
-directly, but that grant is effectively root-equivalent — a trusted user can
-inject arbitrary paths into the store. Prefer the system-wide cache config above
-unless you already trust yourself that far.
-
-**Build it yourself.** Answer `N` at the prompt, or pass
-`--no-accept-flake-config`, and Nix compiles QEMU from source. Everything else
-still comes from `cache.nixos.org` — only QEMU is affected.
-
-If you would rather never build QEMU *and* never add a third-party cache, set
-`microvm.qemu.package = pkgs.qemu_test;` in `modules/base.nix`: that variant is
-in `cache.nixos.org`, at the cost of ~575 MiB more closure (it carries every
-target architecture, not just the host's).
+- **A VM boundary, not a container.** Separate kernel and process tree; the host is reachable only through what you explicitly share, and the network is user-mode NAT that cannot bind host ports.
+- **Your project at `/work`, read-write.** Shared over virtiofs by an unprivileged daemon — no root or sudo, and files the guest creates are owned by your host user.
+- **Start it and forget it.** The agent launches on boot; when it exits the VM powers off and its virtiofs daemons are cleaned up.
+- **Per-project state that persists.** Sessions, credentials and settings live in a host directory that survives relaunches. Each agent gets its own; several VMs can run against the same project, or different ones in parallel.
+- **Four agents from one set of modules.** Claude Code, Gemini CLI, Codex CLI and Pi — see [Flavors](#flavors).
+- **Container runtimes on demand.** Docker, containerd, CRI-O and Podman, activated per launch with `ENABLE_CRI` and backed by a real disk rather than the share.
+- **Your dev shell inside the guest.** A project's `flake.nix` or devenv shell is evaluated once on the host, cached, and sourced at boot — no Nix evaluation in the VM.
+- **Little left behind.** The writable Nix store is a per-run sparse disk removed on exit; [Leaving nothing on the host](#leaving-nothing-on-the-host) inventories everything else and how to avoid it.
 
 ## Flavors
 
@@ -105,7 +30,21 @@ All flavors include container runtime support (Docker, containerd, CRI-O, Podman
 
 > **Gemini CLI first login:** Choosing "Login with Google" restarts the CLI process, which causes the VM to shut down (the VM powers off when the agent exits). On the next launch the CLI prompts for a token with a login URL directly and works normally. This is a first-start-only issue.
 
+## Prerequisites
+
+- [Nix](https://nixos.org/) with flakes enabled
+- KVM support (`/dev/kvm`)
+
 ## Quick start
+
+> [!IMPORTANT]
+> **The first build compiles QEMU from source — roughly 20 minutes — unless you
+> enable a binary cache first.** microvm.nix needs a QEMU variant that
+> `cache.nixos.org` no longer carries, and the build recurs after every
+> `flake.lock` bump that moves QEMU. Two caches serve it prebuilt as a ~35 MiB
+> download, but enabling one is a trust decision, and on a multi-user Nix
+> install answering the prompt is not enough on its own — see
+> [Binary caches](#binary-caches).
 
 ```sh
 # Build and run Claude Code (default) with current directory mounted at /work
@@ -192,6 +131,87 @@ Add as a dependency in another project's `flake.nix`:
 ```
 
 Then `nix develop` gives you `microvm-run` in the shell.
+
+## Binary caches
+
+microvm.nix builds QEMU as `qemu_kvm.override { nixosTestRunner = true; }` (its
+`microvm.optimize.enable` default, which keeps the QEMU closure at ~845 MiB
+instead of ~1.5 GiB). Since nixpkgs dropped `hostCpuOnly` from `qemu_test`
+([NixOS/nixpkgs#541354](https://github.com/NixOS/nixpkgs/pull/541354), merged
+2026-07-21) that exact combination is no longer built by Hydra, so it is **not
+in `cache.nixos.org`**. Building it from source takes roughly 20 minutes, and it
+recurs after every `flake.lock` bump that moves QEMU or its dependencies — not
+just on first use.
+
+Two caches serve the prebuilt QEMU (~35 MiB download), and `flake.nix` declares
+both in `nixConfig`:
+
+| Cache | Who signs it | Populated by |
+|-------|--------------|--------------|
+| `systemstart.cachix.org` | this project | every CI build of `.#claude`/`.#gemini`/`.#codex`/`.#pi` |
+| `microvm.cachix.org` | upstream [microvm.nix](https://github.com/microvm-nix/microvm.nix) | upstream CI (hits only when its nixpkgs pin matches ours) |
+
+Substituters are a trust decision: a cache you enable can hand you any build
+output it likes, signed with its own key. Pick whichever you prefer.
+
+**Use the caches.** `nix build`/`nix run` (and `direnv reload`, via
+`nix print-dev-env`) prompts once per setting, then offers to remember the
+answer in `~/.local/share/nix/trusted-settings.json` — per user, keyed by the
+exact value, not per repo:
+
+```
+do you want to allow configuration setting 'extra-substituters' to be set to
+'https://systemstart.cachix.org https://microvm.cachix.org' (y/N)?
+```
+
+**Answering the prompts is not enough on a multi-user install.** `substituters`
+and `trusted-public-keys` are *restricted settings*: the client hands them to
+`nix-daemon`, which drops them unless you are listed in `trusted-users`. Both
+gates are independent, so accepting the flake config and still getting no cache
+looks like this:
+
+```
+do you want to permanently mark this value as trusted (y/N)? y
+warning: ignoring untrusted substituter 'https://systemstart.cachix.org', you are not a trusted user.
+warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
+```
+
+The fix is daemon-side. Configure the caches system-wide — the narrower grant,
+and it works no matter who runs the build:
+
+```nix
+# NixOS
+nix.settings = {
+  substituters = [ "https://systemstart.cachix.org" "https://microvm.cachix.org" ];
+  trusted-public-keys = [
+    "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
+    "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
+  ];
+};
+```
+
+```conf
+# non-NixOS: /etc/nix/nix.conf
+extra-substituters = https://systemstart.cachix.org https://microvm.cachix.org
+extra-trusted-public-keys = systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE= microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
+```
+
+Restart the daemon afterwards (`systemctl restart nix-daemon`, or
+`sudo launchctl kickstart -k system/org.nixos.nix-daemon` on macOS).
+
+Adding yourself to `trusted-users` instead makes the flake's `nixConfig` work
+directly, but that grant is effectively root-equivalent — a trusted user can
+inject arbitrary paths into the store. Prefer the system-wide cache config above
+unless you already trust yourself that far.
+
+**Build it yourself.** Answer `N` at the prompt, or pass
+`--no-accept-flake-config`, and Nix compiles QEMU from source. Everything else
+still comes from `cache.nixos.org` — only QEMU is affected.
+
+If you would rather never build QEMU *and* never add a third-party cache, set
+`microvm.qemu.package = pkgs.qemu_test;` in `modules/base.nix`: that variant is
+in `cache.nixos.org`, at the cost of ~575 MiB more closure (it carries every
+target architecture, not just the host's).
 
 ## How it works
 
