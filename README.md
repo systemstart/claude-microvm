@@ -304,9 +304,9 @@ The dev shell environment is cached on the host and sourced on VM boot — no ni
 
 - **Flake projects** (`flake.nix`): cached via `nix print-dev-env`
 - **Flake-based devenv** (`flake.nix` + `devenv.nix`): cached via `nix print-dev-env --impure`
-- **Non-flake devenv** (`.devenv.flake.nix`): cached via `devenv print-dev-env` (requires `devenv` on host PATH)
+- **devenv without a flake** (`devenv.nix`, as written by `devenv init`): cached via `devenv print-dev-env` (requires `devenv` on host PATH)
 
-The cache is invalidated automatically when `flake.nix`, `flake.lock`, `.devenv.flake.nix`, `devenv.nix`, `devenv.yaml`, or `devenv.lock` changes. If caching fails, check `~/.microvm-devshell.err` inside the VM for the error.
+The cache is invalidated automatically when `flake.nix`, `flake.lock`, `.devenv.flake.nix`, `devenv.nix`, `devenv.yaml`, or `devenv.lock` changes. If caching fails, check `~/.microvm-devshell.err` inside the VM for the error. A launch that finds nothing to cache, or that needs `devenv` when it is not on PATH, says so on the console.
 
 ### Custom CA certificates
 
