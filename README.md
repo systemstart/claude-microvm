@@ -350,6 +350,8 @@ Rebuild with `make claude`.
 | Network  | User-mode (SLiRP) |
 | Work dir | Host directory via virtiofs (read-write) |
 | Home dir | `~/.local/share/<agent>-microvm/<basename>-<hash>` (shared across instances) or custom via `AGENT_HOME` |
+| Root fs  | RAM-backed tmpfs (50% of `VM_MEM`) |
+| Nix store | Host store read-only over 9p, plus a 10 GiB sparse disk for what the VM writes — see [Writable Nix store disk](#writable-nix-store-disk) |
 
 ### Environment variables
 
@@ -361,13 +363,130 @@ Rebuild with `make claude`.
 | `VM_VCPU` | VM vCPU count | `4` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
-| `CRI_STORAGE_SIZE` | Cap on the CRI storage disk in MiB. Sparse, so it is a ceiling rather than an allocation. Applies when the image is first created only — see [Container runtime support](#container-runtime-support) | `30720` (30 GiB) |
+| `CRI_STORAGE_SIZE` | Cap on the CRI storage disk in MiB, applied when the image is first created. Sparse, so it is a ceiling rather than an allocation. `0` runs without the disk entirely. The disk is only *created* when `ENABLE_CRI` is set — see [Container runtime support](#container-runtime-support) | `30720` (30 GiB) |
+| `VM_STORE_SIZE` | Cap on the writable Nix store disk in MiB. Sparse, and recreated on every launch, so it applies to every run. Minimum 1024; `0` is rejected — see [Leaving nothing on the host](#leaving-nothing-on-the-host) | `10240` (10 GiB) |
 | `ANTHROPIC_API_KEY` | API key for Claude Code (claude flavor) | — |
 | `GEMINI_API_KEY` | API key for Gemini CLI (gemini flavor) | — |
 | `OPENAI_API_KEY` | API key for Codex CLI (codex flavor) and Pi (pi flavor) | — |
 | `EXTRA_CA_CERTS` | Path to a PEM file or directory of PEM files containing custom CA certificates to trust inside the VM | (system CAs only) |
 | `EXTRA_ENV` | Extra environment variables to forward into the VM, comma-separated. `FOO=bar` assigns a literal value; a bare `FOO` forwards `$FOO` from the host environment (keeps secrets off the command line). | (none) |
 | `AGENTS_ARGS` | Extra arguments appended to the agent launch command. Use for one-shot prompts (e.g. `'-p "summarize this repo"'`) or to enable dangerous flags (e.g. `--dangerously-skip-permissions`). Re-parsed via `eval`, so quoting works. | (none) |
+
+### Writable Nix store disk
+
+`/nix/store` in the guest is an overlay: the host's store, read-only over 9p,
+with everything this VM writes on top. That writable half lives on its own
+sparse ext4 image at `$AGENT_HOME-store/nix-store-overlay.img` (10 GiB by
+default), mounted at `/nix/.rw-store` in the initrd before the overlay that uses
+it. Nix build directories are pointed at the same disk, so a large unpack does
+not land in RAM either.
+
+The cap is a ceiling, not an allocation: a fresh image costs the host ~69 MiB of
+ext4 metadata and grows only as the VM writes. It is also a containment
+boundary — the guest should not be able to eat an unbounded slice of the host's
+disk — which is why the default is modest rather than generous. Sizes up to
+10 GiB all cost the same 69 MiB up front, so that is where the default sits.
+
+It is a disk rather than the RAM-backed rootfs because of how much lands there.
+Every `nix develop` on a **dirty git worktree** — the normal state while working
+— cannot use the git object store as its source, so Nix snapshots the entire
+working directory into the store as a `…-source` path, and mints a new one for
+each distinct dirty state. Snapshots of a few hundred MiB are ordinary; a day of
+render/commit cycles across a few repos can produce 15 GiB of them. On tmpfs
+that is RAM, and the first thing to notice is a write failing:
+
+```
+error: write of 26300 bytes: No space left on device
+```
+
+The image is **recreated empty on every launch**, so each boot starts with a
+clean writable store. That is deliberate: the guest imports a snapshot of the
+host's Nix database at boot (see [docs/NIX-STORE-GOTCHAS.md](docs/NIX-STORE-GOTCHAS.md)),
+which knows nothing about paths a previous run built, so a persistent image
+would accumulate store paths Nix considers invalid and never reuses. Restarting
+the VM therefore remains the guaranteed way back to an empty store — and it is
+also why the image costs the host nothing while no VM is running.
+
+Raise the ceiling for a heavy workload:
+
+```sh
+VM_STORE_SIZE=40960 make claude.run
+```
+
+To reclaim space without restarting, the guest ships `vm-store-prune`:
+
+```sh
+vm-store-prune              # delete the `…-source` worktree snapshots
+vm-store-prune --all        # every VM-local path nothing references
+vm-store-prune --dry-run    # list candidates, delete nothing
+```
+
+A timer runs the first of those for you when free space on the store disk drops
+below 2 GiB (`claude-vm.store.autoPrune`). It is built not to become a load
+source of its own: a tick that finds space is a single `statfs`, runs cannot
+overlap or queue up behind each other (the interval is measured from when the
+last run *finished*), and consecutive passes that free nothing — which is what
+you get when a live dev shell is holding the space — back off 15m → 30m → 1h →
+2h, resetting as soon as free space is healthy. The service is `Nice=19` with
+idle I/O priority, so it yields to the agent's own work. Last outcome:
+
+```sh
+cat /run/vm-store-autoprune/status
+```
+
+Note this is *not* nix's `min-free`, which must stay 0 here: that hooks the
+build loop and calls the full garbage collector, which on this overlay deletes
+the host's store paths behind whiteouts. Same trigger, wrong collector.
+
+Do **not** run `nix-collect-garbage` inside the guest. On this overlay it walks
+every host path the imported database knows about and writes a whiteout into the
+VM's writable layer for each one it wants to delete: it consumes the space it was
+meant to free and hides host store paths from `/nix/store`. `vm-store-prune`
+exists because the safe subset — paths present in the upper layer and absent
+from the host's store — is not something to reconstruct by hand under disk
+pressure.
+
+Prevention is cheaper than cleanup: batch commits (every pre-commit hook that
+shells out to `nix develop` can mint a snapshot), work inside one dev shell
+rather than paying a flake evaluation per command, and keep `result*` symlinks
+out of the tree — each one is a GC root that pins a snapshot.
+
+Set `claude-vm.store.diskBacked = false` to go back to the RAM-backed store, or
+`claude-vm.store.size` to change the default cap.
+
+### Leaving nothing on the host
+
+If you run the VM for the isolation and would rather it left no artifacts
+behind, here is the complete inventory of what it writes outside the Nix store,
+and what you can do about each:
+
+| artifact | lifetime | how to avoid it |
+|---|---|---|
+| `$AGENT_HOME-cri/cri-storage.img` | persistent, ~133 MiB minimum, grows to the cap | not created unless `ENABLE_CRI` is set; `CRI_STORAGE_SIZE=0` also detaches an existing one |
+| `$AGENT_HOME-store/nix-store-overlay.img` | per-run, ~69 MiB, deleted on exit along with its directory | build-time only: `claude-vm.store.diskBacked = false` |
+| `$AGENT_HOME` (agent state, dev-shell cache, nix DB snapshot ~97 MiB) | persistent | point `AGENT_HOME` somewhere disposable |
+
+The CRI disk used to be created on every launch whether or not `ENABLE_CRI` was
+set, and it is never deleted. It is now only created for a run that asks for
+container runtimes, so a workspace that never uses them accumulates nothing —
+see [When the disk is created and attached](#when-the-disk-is-created-and-attached).
+`CRI_STORAGE_SIZE=0` is the harder switch: it detaches even an existing image.
+Either way the guest's mount carries `nofail`, so the VM boots without the
+device and `/var/lib/containers` is just a directory. Pairing `CRI_STORAGE_SIZE=0`
+with `ENABLE_CRI` is allowed but warns — container storage would land on the
+VM's RAM.
+
+```sh
+CRI_STORAGE_SIZE=0 make claude.run
+```
+
+The writable store disk cannot be dropped the same way, and `VM_STORE_SIZE=0` is
+rejected rather than silently doing something odd. That mount is `neededForBoot`
+and `/nix/store`'s overlay hard-requires it, so a missing device is a failed boot
+rather than a fallback — the one place where a tolerant mount would be a lie.
+Its image is already per-run and removed on exit, so what it costs a host at rest
+is nothing; if you want it gone during the run too, that is the build-time
+`claude-vm.store.diskBacked = false`.
 
 ### Container runtime support
 
@@ -391,6 +510,28 @@ ENABLE_CRI=podman make claude.run
 ```
 
 Container images and layers are stored on a dedicated ext4 disk image at `$AGENT_HOME-cri/cri-storage.img` (sparse, up to 30 GiB), mounted at `/var/lib/containers`, so they persist across VM restarts and don't consume the VM's RAM-backed root filesystem. The image is kept in a host-only sibling directory next to agent home rather than inside it, so it is never exported through the agent-home virtiofs share and the guest cannot read or tamper with its own raw storage backing file. A real block-backed filesystem is required here rather than a virtiofs share: image unpack must `lchown` extracted layers to UID 0, which the host's rootless virtiofsd cannot do (it has a single-ID uid map). On a share, `docker info` reports `Backing Filesystem: fuse` and overlay2/KinD layer extraction fails with `lchown … operation not permitted`; on the ext4 volume it reports `extfs` and works.
+
+#### When the disk is created and attached
+
+`ENABLE_CRI` decides which runtimes start inside the guest. It also decides
+whether the disk gets *created* — but never whether an existing one is attached:
+
+| `CRI_STORAGE_SIZE` | `ENABLE_CRI` | image on disk | result |
+|---|---|---|---|
+| unset | unset | none | no image, no directory, no drive |
+| unset | set | none | created at the cap, attached |
+| unset | either | exists | attached |
+| `0` | any | any | never attached; an existing image is left untouched |
+
+So a workspace launched once with `ENABLE_CRI=containerd,docker` and then
+launched plain still has its disk attached: the layer cache, named volumes and
+any KinD cluster are exactly where they were, and starting a runtime by hand
+finds a real disk rather than silently writing to RAM. Only the runtimes stop
+being started for you. Going the other way — plain first, then `ENABLE_CRI` —
+creates the image on the first run that asks for it.
+
+Nothing in the launcher ever deletes the image; detaching is reversible,
+deleting is not. To reclaim the space, remove `$AGENT_HOME-cri/` yourself.
 
 #### Sizing the CRI disk
 
@@ -424,6 +565,11 @@ or delete the image and let the next run recreate it. Deleting discards
 everything on it — not just cached image layers but the state of any KinD
 cluster or named volume living there — so prefer the in-place grow unless you
 want a clean slate.
+
+`CRI_STORAGE_SIZE=0` runs without the disk at all — see
+[Leaving nothing on the host](#leaving-nothing-on-the-host). Container runtimes
+then have nowhere real to put images, so it is meant for runs that do not use
+them; pairing it with `ENABLE_CRI` warns and falls back to the VM's RAM.
 
 
 #### Available runtimes

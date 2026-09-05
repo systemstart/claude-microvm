@@ -7,45 +7,70 @@
     shellInit = ''
       # Seed microVM disk-space awareness into Claude's user-level memory
       mkdir -p ~/.claude
-      if ! grep -q '<!-- MICROVM-DISK-SPACE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+      # Supersedes the pre-store-volume block, which told the agent that the
+      # writable store lives in RAM and that clearing /tmp is the remedy.
+      if grep -q '<!-- MICROVM-DISK-SPACE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+        sed -i '/<!-- MICROVM-DISK-SPACE -->/,/^Keep this in mind throughout the entire session\.$/d' ~/.claude/CLAUDE.md
+      fi
+      if ! grep -q '<!-- MICROVM-DISK-SPACE-2 -->' ~/.claude/CLAUDE.md 2>/dev/null; then
         cat >> ~/.claude/CLAUDE.md << 'VMEOF'
 
-<!-- MICROVM-DISK-SPACE -->
+<!-- MICROVM-DISK-SPACE-2 -->
 # MicroVM Disk Space
 
-You are running inside a microVM with a RAM-backed writable filesystem.
-Disk space is severely limited. **Check disk space proactively** before
-operations that consume storage (installing packages, building projects,
-downloading files, writing large outputs).
-
-## How to check
+Two filesystems here can fill up, for different reasons. **Check before
+operations that consume storage** (installing packages, building projects,
+downloading files, writing large outputs):
 
 ```bash
-df -h / /nix
+df -h / /nix/store
 ```
+
+- **`/` is a RAM-backed tmpfs** of a few GiB with no slack — what fills it is
+  memory. `/tmp` and anything written outside `/work` and `/home/agent` counts
+  against it.
+- **`/nix/store` is an overlay**: the host's store read-only underneath, plus
+  this VM's writes on a dedicated sparse disk. Every `nix build`, `nix develop`
+  and substitution lands there — including a full copy of the working tree each
+  time a flake input is a dirty git worktree, which is hundreds of MiB per
+  distinct dirty state.
+- `/work` and `/home/agent` are host directories over virtiofs, and
+  `/var/lib/containers` is its own disk. Files there cost neither of the above.
 
 ## Thresholds
 
-- **Low space (<10% free)**: Warn the user immediately. Suggest cleanup:
-  `rm -rf /tmp/*` and check for large files in the overlay upper layer with
-  `du -sh /nix/.rw-store/store`
-- **No space left (0% free or write failures like "No space left on device")**:
-  Stop what you are doing and tell the user. Prioritise freeing space before
-  continuing any other work. Clear `/tmp`, and verify space was reclaimed
-  with `df -h`.
+- **Low space (<10% free)**: warn the user immediately, and say *which* of the
+  two is filling — the remedies are different.
+- **No space left** (`No space left on device`): stop and tell the user before
+  continuing anything else.
+
+## Reclaiming space in /nix/store
+
+```bash
+vm-store-prune              # drop the `…-source` worktree snapshots
+vm-store-prune --all        # every VM-local path nothing references
+vm-store-prune --dry-run    # list first, delete nothing
+```
+
+It skips paths that are still referenced, so it is safe to run at any time.
+Batching work into fewer `nix develop` / commit cycles is what stops the
+snapshots accumulating in the first place.
+
+A timer already runs the first of those when free space drops below 2 GiB, and
+backs off if a pass frees nothing — so if the store is tight, something live is
+holding it (a dev shell you are still in, a `result` symlink, a running build)
+rather than nobody having cleaned up. `cat /run/vm-store-autoprune/status` shows
+the last outcome.
 
 ## IMPORTANT: Do NOT run `nix-collect-garbage`
 
-`/nix/store` is an overlayfs over the host's read-only store. Running
-`nix-collect-garbage` does NOT free space — it creates whiteout entries in
-the RAM-backed upper layer for every host store path, which:
-- wastes time (tens of thousands of paths)
-- can fill up the tmpfs with whiteouts
-- breaks Nix by hiding host store paths
-
-To free Nix-related space, only remove paths that were built/installed
-**inside the VM** (they live in `/nix/.rw-store/store` as real files,
-not whiteouts).
+It does not free space here and it breaks Nix. `/nix/store` is an overlay over
+the host's read-only store, so GC writes a whiteout into this VM's writable
+layer for every host path it wants to delete: it consumes the space it was
+meant to reclaim, takes minutes, and hides host store paths from `/nix/store`.
+The same goes for anything that shells out to a full GC (`nix store gc`,
+`nix-store --gc`). Use `vm-store-prune`, which only ever touches paths this VM
+created.
 
 Keep this in mind throughout the entire session.
 VMEOF

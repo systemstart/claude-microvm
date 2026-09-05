@@ -41,7 +41,7 @@
         pi     = { suffix = "-pi";    agentModule = ./modules/agents/pi.nix;    dataDirName = "pi-microvm";    apiKeyVars = [ "ANTHROPIC_API_KEY" "OPENAI_API_KEY" "GEMINI_API_KEY" ]; };
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, defaultMem, defaultVcpu, defaultCriSize }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -54,8 +54,36 @@
         VM_MEM="''${VM_MEM:-${toString defaultMem}}"
         VM_VCPU="''${VM_VCPU:-${toString defaultVcpu}}"
         CRI_STORAGE_SIZE="''${CRI_STORAGE_SIZE:-${toString defaultCriSize}}"
+        ${lib.optionalString storeDiskBacked ''VM_STORE_SIZE="''${VM_STORE_SIZE:-${toString defaultStoreSize}}"''}
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
         ID="$(cat /proc/sys/kernel/random/uuid)"
+
+        # Volume size knobs are integers in MiB. Validate before QEMU sees them:
+        # a bad value otherwise surfaces as a mkfs failure or, worse, a store
+        # too small to hold a dev shell — which looks like a Nix bug from inside
+        # the guest.
+        if ! [[ "$CRI_STORAGE_SIZE" =~ ^[0-9]+$ ]]; then
+          echo "error: CRI_STORAGE_SIZE must be an integer in MiB (0 disables the disk)" >&2
+          exit 1
+        fi
+        if [ "$CRI_STORAGE_SIZE" -ne 0 ] && [ "$CRI_STORAGE_SIZE" -lt 1024 ]; then
+          echo "error: CRI_STORAGE_SIZE must be at least 1024 MiB, or 0 to run without container storage" >&2
+          exit 1
+        fi
+        if [ "$CRI_STORAGE_SIZE" -eq 0 ] && [ -n "''${ENABLE_CRI:-}" ]; then
+          echo "warning: CRI_STORAGE_SIZE=0 with ENABLE_CRI=''${ENABLE_CRI} — container storage will" >&2
+          echo "         fall back to the VM's RAM-backed rootfs. Image pulls will consume memory," >&2
+          echo "         and layer unpack may fail on ownership. Unset CRI_STORAGE_SIZE to get a disk." >&2
+        fi${lib.optionalString storeDiskBacked ''
+
+        if ! [[ "$VM_STORE_SIZE" =~ ^[0-9]+$ ]] || [ "$VM_STORE_SIZE" -lt 1024 ]; then
+          echo "error: VM_STORE_SIZE must be an integer of at least 1024 (MiB)." >&2
+          echo "       Unlike CRI_STORAGE_SIZE, 0 is not accepted: the writable store is mounted" >&2
+          echo "       in the initrd and /nix/store's overlay requires it, so a missing disk is a" >&2
+          echo "       failed boot, not a fallback to RAM. Build with claude-vm.store.diskBacked" >&2
+          echo "       = false for the RAM-backed store (see README)." >&2
+          exit 1
+        fi''}
 
         # Derive project basename for host-visible identifiers
         WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
@@ -132,14 +160,65 @@
         # dir that persists across runs but is never shared into the guest. The
         # CRI module declares the image as "cri-storage.img"; rewrite it to this
         # absolute path below.
+        # Whether to attach the container storage disk at all. The guest's mount
+        # for it carries `nofail`, so a launch without the drive boots fine and
+        # /var/lib/containers stays an ordinary directory.
+        #
+        #   CRI_STORAGE_SIZE=0   never — explicit opt-out, even for CRI runs
+        #   ENABLE_CRI set       yes, creating the image if it does not exist
+        #   ENABLE_CRI empty     only if the image already exists
+        #
+        # The last rule is what keeps this honest in both directions. A user who
+        # never touches containers never gets a ~133 MiB image they did not ask
+        # for; a user who has one keeps it attached on every launch, so a run
+        # without ENABLE_CRI cannot make an existing image cache or KinD cluster
+        # look like it evaporated — and starting a runtime by hand still finds a
+        # real disk rather than silently writing to RAM.
+        #
+        # Nothing here ever deletes the image: detaching is reversible, deleting
+        # is not.
         CRI_STATE_DIR="$AGENT_DIR-cri"
-        mkdir -p "$CRI_STATE_DIR"
         CRI_IMG="$CRI_STATE_DIR/cri-storage.img"
+        CRI_ATTACH=1
+        if [ "$CRI_STORAGE_SIZE" -eq 0 ]; then
+          CRI_ATTACH=0
+        elif [ -z "''${ENABLE_CRI:-}" ] && [ ! -e "$CRI_IMG" ]; then
+          CRI_ATTACH=0
+        fi
+        if [ "$CRI_ATTACH" -eq 1 ]; then
+          mkdir -p "$CRI_STATE_DIR"
+        fi
+
+        ${lib.optionalString storeDiskBacked ''
+        # --- Writable /nix/store overlay volume (ext4 block image) ---
+        # The guest's writable store lives on this disk rather than on its
+        # RAM-backed rootfs: `nix develop` snapshots the whole working tree into
+        # the store whenever a flake input is a dirty git worktree, and a day of
+        # those fills tmpfs and takes the VM down with ENOSPC. Host-only sibling
+        # dir for the same reason as the CRI image — never exported through the
+        # agent-home share, so the guest cannot reach its own backing file.
+        #
+        # Deliberately recreated empty on every launch. The guest imports a
+        # snapshot of the *host's* nix DB at boot, which knows nothing about
+        # paths a previous run built, so a persistent image would accumulate
+        # store paths that nix considers invalid and never reuses — and it would
+        # break the documented "restart the VM to get a clean store" escape
+        # hatch. A VM still running off this image keeps its own open fd, so the
+        # unlink below does not disturb it.
+        STORE_STATE_DIR="$AGENT_DIR-store"
+        mkdir -p "$STORE_STATE_DIR"
+        STORE_IMG="$STORE_STATE_DIR/nix-store-overlay.img"
+        rm -f "$STORE_IMG"
+        ''}
 
         cleanup() {
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
           rm -f "$SOCK" "$AGENT_SOCK" "$STATE" "$AGENT_STATE"
+          ${lib.optionalString storeDiskBacked ''rm -f "$STORE_IMG"
+          # Leave nothing behind on the host: the dir is ours and the image is
+          # gone, so drop it unless something else put files there.
+          rmdir "$STORE_STATE_DIR" 2>/dev/null || true''}
           if [ -n "$AGENT_TEMP" ]; then
             rm -rf "$AGENT_TEMP"
           fi
@@ -302,6 +381,7 @@
         # that are special on the replacement side (\, &) and the | delimiter
         # so a path with such characters can't corrupt the generated command.
         _CRI_IMG_ESC=$(printf '%s' "$CRI_IMG" | ${pkgs.gnused}/bin/sed -e 's/[\\&|]/\\&/g')
+        ${lib.optionalString storeDiskBacked ''_STORE_IMG_ESC=$(printf '%s' "$STORE_IMG" | ${pkgs.gnused}/bin/sed -e 's/[\\&|]/\\&/g')''}
 
         # Build sed arguments for QEMU runner
         _SED_ARGS=(
@@ -316,7 +396,17 @@
           # CRI storage volume image: microvm.nix emits the relative path
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.
-          -e "s|cri-storage.img|$_CRI_IMG_ESC|g"
+          -e "s|cri-storage.img|$_CRI_IMG_ESC|g"${lib.optionalString storeDiskBacked ''
+
+          # Writable store volume size (VM_STORE_SIZE env var, MiB). Runs before
+          # the image path is rewritten below, so it can anchor on the image name
+          # and cannot be confused with the CRI volume's truncate line — sed
+          # applies -e expressions in order.
+          -e "s|truncate -s ${toString defaultStoreSize}M 'nix-store-overlay.img'|truncate -s ''${VM_STORE_SIZE}M 'nix-store-overlay.img'|g"
+          # Writable store volume image: as for the CRI image, microvm.nix emits
+          # the relative "nix-store-overlay.img" in both the createVolumesScript
+          # and the QEMU -drive.
+          -e "s|nix-store-overlay.img|$_STORE_IMG_ESC|g"''}
           # CRI storage volume size (CRI_STORAGE_SIZE env var, MiB). microvm.nix
           # emits `truncate -s <size>M` inside an `[ ! -e <image> ]` guard, so
           # this sizes a freshly created image only: an existing one keeps the
@@ -338,6 +428,20 @@
           -e "s| -smp ${toString defaultVcpu} | -smp $VM_VCPU |g"
           -e "s|size=${toString defaultMem}M|size=''${VM_MEM}M|g"
         )
+
+        # Dropping the CRI disk is a deletion rather than a rewrite, and it runs
+        # after the substitutions above, so both patterns have to tolerate the
+        # image path already being absolute — hence `[^']*cri-storage\.img`
+        # rather than an anchor on the relative name. Keyed on the image name
+        # and not on the drive letter, which shifts with the volume order.
+        if [ "$CRI_ATTACH" -eq 0 ]; then
+          _SED_ARGS+=(
+            # The `if [ ! -e … ]; then … fi` block that would create the image.
+            -e "/^if \[ ! -e '[^']*cri-storage\.img' \]; then$/,/^fi$/d"
+            # The drive and the virtio-blk device that exposes it.
+            -e "s|-drive '[^']*cri-storage\.img[^']*' -device '[^']*' ||g"
+          )
+        fi
 
         # Run QEMU with corrected paths
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run)
@@ -411,6 +515,8 @@
           defaultMem = nixosCfg.claude-vm.agent.mem;
           defaultVcpu = nixosCfg.claude-vm.agent.vcpu;
           defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
+          storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
+          defaultStoreSize = nixosCfg.claude-vm.store.size;
         }) vmFlavors
       );
 
@@ -421,6 +527,10 @@
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        store-overlay-disk = import ./tests/store-overlay-disk.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
       });
     };
 }

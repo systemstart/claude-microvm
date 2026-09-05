@@ -70,6 +70,22 @@ CRIEOF
       }
     ];
 
+    # `CRI_STORAGE_SIZE=0` on the host launches without this drive at all, for
+    # people who want the VM's isolation and no artifacts on their disk. Boot
+    # must not care: `nofail` keeps the mount out of local-fs.target's
+    # requirements and out of its ordering, so a device that never appears is
+    # skipped rather than waited on, and /var/lib/containers stays an ordinary
+    # directory on the rootfs. The short device timeout only bounds how long the
+    # pending job lingers; without it the default is 90s.
+    #
+    # Safe here precisely because this mount is not `neededForBoot` — the same
+    # trick is not available to the writable store overlay, which the initrd
+    # requires.
+    fileSystems."/var/lib/containers".options = [
+      "nofail"
+      "x-systemd.device-timeout=5s"
+    ];
+
     boot.kernelModules = [ "overlay" "br_netfilter" "veth" "ip_tables" "nf_nat" "xt_conntrack" ];
     boot.kernel.sysctl = {
       "net.bridge.bridge-nf-call-iptables" = 1;

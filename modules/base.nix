@@ -1,6 +1,24 @@
 { pkgs, lib, config, ... }:
 let
   cfg = config.claude-vm.agent;
+  storeCfg = config.claude-vm.store;
+
+  # Reclaiming space in the writable store is a footgun here — `nix-collect-garbage`
+  # walks every host path visible through the overlay's lower layer and writes a
+  # whiteout for it into the upper one — so ship the safe recipe as a command
+  # rather than leave it to be reinvented under disk pressure. See the script
+  # header and docs/NIX-STORE-GOTCHAS.md.
+  vmStorePrune = pkgs.writeShellApplication {
+    name = "vm-store-prune";
+    runtimeInputs = with pkgs; [ coreutils findutils gnugrep gnused nix ];
+    text = builtins.readFile ../scripts/vm-store-prune.sh;
+  };
+
+  vmStoreAutoPrune = pkgs.writeShellApplication {
+    name = "vm-store-autoprune";
+    runtimeInputs = with pkgs; [ coreutils vmStorePrune ];
+    text = builtins.readFile ../scripts/vm-store-autoprune.sh;
+  };
 in
 {
   imports = [ ./hardening.nix ];
@@ -36,6 +54,85 @@ in
     };
   };
 
+  options.claude-vm.store = {
+    diskBacked = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Back the writable half of /nix/store with a sparse ext4 volume on the
+        host instead of the VM's RAM-backed root filesystem.
+
+        Everything nix writes inside the guest lands in that overlay: build
+        outputs, substituted paths, and — the one that bites — a full copy of
+        the working tree every time a flake input is a dirty git worktree,
+        which is the normal state while working. Those `…-source` snapshots run
+        to hundreds of MiB each and a fresh one is minted per distinct dirty
+        state, so on tmpfs a day of `nix develop` churn fills RAM and the VM
+        starts failing writes with ENOSPC. On a volume the same churn costs
+        host disk, which is the resource there is plenty of.
+
+        The volume is recreated empty on every launch, so the guest still boots
+        with an empty writable store, and `vm-store-prune` reclaims space
+        without a restart.
+      '';
+    };
+
+    size = lib.mkOption {
+      type = lib.types.int;
+      default = 10240;
+      description = ''
+        Cap on the writable store volume in MiB. The image is sparse, so this is
+        a ceiling rather than an allocation: what it costs the host up front is
+        the filesystem metadata, ~69 MiB at any cap up to 10 GiB (ext4 doubles
+        that somewhere before 20 GiB). It is a containment boundary as much as a
+        budget — the guest should not be able to eat an unbounded amount of the
+        host's disk. Raise it with the VM_STORE_SIZE env var for workloads that
+        genuinely need more. No effect unless `diskBacked` is set.
+      '';
+    };
+
+    autoPrune = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Run `vm-store-prune` from a timer when free space in the writable
+          store drops below `freeMiB`.
+
+          This is the safe counterpart to nix's own `min-free`, which must stay
+          disabled here: `min-free` calls the full garbage collector, which on
+          this overlay deletes the host's store paths behind whiteouts. Same
+          trigger, wrong collector.
+
+          A tick that finds space costs one statfs. Runs cannot overlap, and
+          consecutive passes that free nothing back off to two hours, so a store
+          pinned by a live dev shell does not turn into a re-walk every
+          interval.
+        '';
+      };
+
+      freeMiB = lib.mkOption {
+        type = lib.types.int;
+        default = 2048;
+        description = ''
+          Low watermark in MiB. Deliberately well clear of zero: pruning needs
+          to write to the nix database, so it has to run before the store is
+          actually full, not after.
+        '';
+      };
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "5min";
+        description = ''
+          How long after a run finishes to check again (systemd time span).
+          Measured from completion, not from a wall clock, so ticks can neither
+          overlap nor accumulate a backlog.
+        '';
+      };
+    };
+  };
+
   config = {
     nixpkgs.config.allowUnfree = true;
 
@@ -47,6 +144,23 @@ in
       vcpu = cfg.vcpu;
 
       writableStoreOverlay = "/nix/.rw-store";
+
+      # The writable half of the store, on a disk rather than in RAM — see
+      # `claude-vm.store.diskBacked`. Same shape as the CRI volume: a sparse
+      # ext4 image the runner creates on the host before boot, identified by
+      # label rather than drive letter so the two volumes cannot swap places.
+      # Declaring `mountPoint == writableStoreOverlay` is what makes microvm.nix
+      # mark this filesystem `neededForBoot`, so it is mounted in the initrd
+      # before the overlay that uses it as upperdir.
+      volumes = lib.mkIf storeCfg.diskBacked [
+        {
+          image = "nix-store-overlay.img";
+          label = "nix-rw-store";
+          mountPoint = config.microvm.writableStoreOverlay;
+          size = storeCfg.size;
+          fsType = "ext4";
+        }
+      ];
 
       shares = [
         {
@@ -133,7 +247,40 @@ in
       git
       openssh
       cacert
+      vmStorePrune
     ] ++ cfg.extraPackages;
+
+    # Timer-driven cleanup for the writable store. Deliberately not wanted by
+    # any target: the timer below is the only thing that starts it.
+    systemd.services.vm-store-autoprune = lib.mkIf storeCfg.autoPrune.enable {
+      description = "Prune VM-local Nix store paths when the writable store runs low";
+      environment.VM_STORE_PRUNE_FREE_MIB = toString storeCfg.autoPrune.freeMiB;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = lib.getExe vmStoreAutoPrune;
+        # Housekeeping must never compete with the agent's own work; deletion is
+        # I/O-bound, so the I/O class is the one that matters.
+        Nice = 19;
+        IOSchedulingClass = "idle";
+        # Backstop only. A prune killed part-way is safe — deletion happens in
+        # the daemon, path by path — and the next tick picks up where it left off.
+        TimeoutStartSec = "30min";
+      };
+    };
+
+    systemd.timers.vm-store-autoprune = lib.mkIf storeCfg.autoPrune.enable {
+      description = "Periodic check of writable Nix store free space";
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = storeCfg.autoPrune.interval;
+        # From when the service last *finished*, not from a schedule: a run that
+        # takes longer than the interval delays the next tick instead of having
+        # one queued behind it, and a missed window is never made up in a burst.
+        OnUnitInactiveSec = storeCfg.autoPrune.interval;
+        # The check is cheap but not urgent; let systemd coalesce the wakeups.
+        AccuracySec = "1min";
+      };
+    };
 
     programs.direnv = {
       enable = true;
@@ -186,7 +333,18 @@ in
 
     systemd.tmpfiles.rules = [
       "d /work 0755 agent agent -"
-    ];
+    ] ++ lib.optional storeCfg.diskBacked
+      "d ${config.microvm.writableStoreOverlay}/tmp 0755 root root -";
+
+    # Nix builds unpack into TMPDIR, which defaults to /tmp — the RAM-backed
+    # rootfs. One large unpack (a container image, a vendored module cache) can
+    # take the VM out with ENOSPC while the store volume beside it sits nearly
+    # empty. Point the daemon at the volume instead: the build output has to end
+    # up there anyway, and same-filesystem means the final move into the store is
+    # a rename rather than a copy.
+    systemd.services.nix-daemon.environment = lib.mkIf storeCfg.diskBacked {
+      TMPDIR = "${config.microvm.writableStoreOverlay}/tmp";
+    };
 
     systemd.services.microvm-ca-certs = {
       description = "Inject custom CA certificates into system trust store";
