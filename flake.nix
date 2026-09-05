@@ -159,6 +159,10 @@
         # across launches until the host file moves — at which point the host
         # wins, whole-file. This is convenience, not enforcement: the guest can
         # rewrite the file mid-session like any other agent-home state.
+        # tests/settings-seed.nix extracts the region between these markers and
+        # drives it against fixtures; keep it self-contained on AGENT_SETTINGS,
+        # AGENT_DIR and the tools in the runner closure.
+        # BEGIN settings-seed
         if [ -n "''${AGENT_SETTINGS:-}" ]; then
           if [ ! -f "$AGENT_SETTINGS" ]; then
             echo "error: AGENT_SETTINGS=$AGENT_SETTINGS is not a file" >&2
@@ -188,7 +192,8 @@
             echo "$_SETTINGS_HASH" > "$AGENT_DIR/.microvm-settings.hash"
             echo "seeded ${settingsFile} from $AGENT_SETTINGS"
           fi
-        fi'' else ''
+        fi
+        # END settings-seed'' else ''
         if [ -n "''${AGENT_SETTINGS:-}" ]; then
           echo "warning: AGENT_SETTINGS is not supported for the ${agentName} flavor — ignored" >&2
         fi''}
@@ -614,6 +619,10 @@
           config = self.nixosConfigurations."claude-${system}".config;
         };
         devshell-detection = import ./tests/devshell-detection.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
+        settings-seed = import ./tests/settings-seed.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
         };
