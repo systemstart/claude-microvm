@@ -328,44 +328,60 @@
 
         # Pre-cache dev shell environment on host (fast) so the VM doesn't have to evaluate nix
         _DEVSHELL_CACHE="$AGENT_DIR/.microvm-devshell"
-        # The file tests must be grouped: `A && B || C` parses as `(A && B) || C`,
-        # which would run `nix print-dev-env` on the host against an untrusted
-        # $WORK whenever a marker file exists, even with DIRENV_ALLOW unset.
-        #
-        # devenv.nix is the marker for a devenv project: it is what `devenv init`
-        # writes and what gets committed. .devenv.flake.nix is generated state —
-        # devenv's own .gitignore starts with `.devenv*`, and it does not exist
-        # until a first build — so it stays as a fallback for older layouts
-        # rather than as the thing detection depends on. See issue #19.
-        if [ "''${DIRENV_ALLOW:-0}" = "1" ] && { [ -f "$WORK/flake.nix" ] || [ -f "$WORK/devenv.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; }; then
-          _CURRENT_HASH="$( (cat "$WORK/flake.nix" "$WORK/flake.lock" "$WORK/.devenv.flake.nix" "$WORK/devenv.nix" "$WORK/devenv.yaml" "$WORK/devenv.lock" 2>/dev/null || true) | sha256sum | cut -c1-16)"
-          _CACHED_HASH=""
-          [ -f "$_DEVSHELL_CACHE.hash" ] && _CACHED_HASH="$(cat "$_DEVSHELL_CACHE.hash")"
-          if [ "$_CURRENT_HASH" != "$_CACHED_HASH" ] || [ ! -s "$_DEVSHELL_CACHE" ]; then
-            echo "caching dev shell environment..."
+        if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
+          # Detection only — no evaluation, no side effects, and reached only
+          # with DIRENV_ALLOW=1, which is what keeps `nix print-dev-env` off an
+          # untrusted $WORK. tests/devshell-detection.nix extracts the region
+          # between these markers and drives it against fixture directories, so
+          # keep it free of anything that touches the host.
+          #
+          # devenv.nix is the marker for a devenv project: it is what `devenv
+          # init` writes and what gets committed. .devenv.flake.nix is generated
+          # state — devenv's own .gitignore starts with `.devenv*`, and it does
+          # not exist until a first build — so it stays as a fallback for older
+          # layouts rather than as the thing detection depends on. See issue #19.
+          # BEGIN devshell-detect
+          _DEVSHELL_ELIGIBLE=0
+          _CACHE_CMD=""
+          if [ -f "$WORK/flake.nix" ] || [ -f "$WORK/devenv.nix" ] || [ -f "$WORK/.devenv.flake.nix" ]; then
+            _DEVSHELL_ELIGIBLE=1
             # No flake.nix at the top level means there is nothing for
             # `nix print-dev-env` to evaluate, whichever devenv files are present.
             if ! [ -f "$WORK/flake.nix" ]; then
               _CACHE_CMD="devenv print-dev-env"
-              if ! command -v devenv >/dev/null 2>&1; then
-                echo "warning: $WORK is a devenv project, but devenv is not on PATH — the dev shell will not be available in the VM"
-              fi
             elif [ -f "$WORK/devenv.nix" ]; then
               _CACHE_CMD="nix print-dev-env --no-update-lock-file --impure $WORK"
             else
               _CACHE_CMD="nix print-dev-env --no-update-lock-file $WORK"
             fi
-            if (cd "$WORK" && eval "$_CACHE_CMD") > "$_DEVSHELL_CACHE.tmp" 2>"$_DEVSHELL_CACHE.err"; then
-              mv "$_DEVSHELL_CACHE.tmp" "$_DEVSHELL_CACHE"
-              echo "$_CURRENT_HASH" > "$_DEVSHELL_CACHE.hash"
-              rm -f "$_DEVSHELL_CACHE.err"
-            else
-              rm -f "$_DEVSHELL_CACHE.tmp"
-              echo "warning: could not cache the dev shell; see ~/.microvm-devshell.err in the VM"
+          fi
+          # END devshell-detect
+
+          if [ "$_DEVSHELL_ELIGIBLE" = "0" ]; then
+            echo "warning: DIRENV_ALLOW=1 but $WORK has no flake.nix or devenv.nix — no dev shell to load"
+          else
+            _CURRENT_HASH="$( (cat "$WORK/flake.nix" "$WORK/flake.lock" "$WORK/.devenv.flake.nix" "$WORK/devenv.nix" "$WORK/devenv.yaml" "$WORK/devenv.lock" 2>/dev/null || true) | sha256sum | cut -c1-16)"
+            _CACHED_HASH=""
+            [ -f "$_DEVSHELL_CACHE.hash" ] && _CACHED_HASH="$(cat "$_DEVSHELL_CACHE.hash")"
+            if [ "$_CURRENT_HASH" != "$_CACHED_HASH" ] || [ ! -s "$_DEVSHELL_CACHE" ]; then
+              echo "caching dev shell environment..."
+              case "$_CACHE_CMD" in
+                devenv\ *)
+                  if ! command -v devenv >/dev/null 2>&1; then
+                    echo "warning: $WORK is a devenv project, but devenv is not on PATH — the dev shell will not be available in the VM"
+                  fi
+                  ;;
+              esac
+              if (cd "$WORK" && eval "$_CACHE_CMD") > "$_DEVSHELL_CACHE.tmp" 2>"$_DEVSHELL_CACHE.err"; then
+                mv "$_DEVSHELL_CACHE.tmp" "$_DEVSHELL_CACHE"
+                echo "$_CURRENT_HASH" > "$_DEVSHELL_CACHE.hash"
+                rm -f "$_DEVSHELL_CACHE.err"
+              else
+                rm -f "$_DEVSHELL_CACHE.tmp"
+                echo "warning: could not cache the dev shell; see ~/.microvm-devshell.err in the VM"
+              fi
             fi
           fi
-        elif [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
-          echo "warning: DIRENV_ALLOW=1 but $WORK has no flake.nix or devenv.nix — no dev shell to load"
         fi
 
         # Snapshot host's nix store DB so the VM's DB knows about every path
@@ -552,6 +568,10 @@
         seed-idempotence = import ./tests/seed-idempotence.nix {
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
+        };
+        devshell-detection = import ./tests/devshell-detection.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
         };
       });
     };
