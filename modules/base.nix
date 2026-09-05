@@ -318,6 +318,14 @@ in
     programs.bash.interactiveShellInit = ''
       git config --global --add safe.directory /work 2>/dev/null || true
 
+      # The seed blocks here and in the agent's own shellInit append to a file
+      # on a host share that outlives the VM, so the marker check is what keeps
+      # them idempotent across boots. It is not enough *within* a boot: the
+      # console and tty1 logins start their shells at the same instant, and on
+      # the first boot after a new block is introduced both pass the check
+      # before either appends, seeding it twice. Serialise the whole region.
+      exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
+
       # ENFILE on a share is an obscure failure with a non-obvious recovery, and
       # the agent is the one who will hit it. Seed the recognition and the fix.
       if [ -d ~/.claude ] && ! grep -q '<!-- MICROVM-SHARE-ENFILE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
@@ -344,6 +352,8 @@ SHAREEOF
       fi
 
       ${cfg.shellInit}
+
+      exec 9>&-
 
       cd /work 2>/dev/null || true
       # `set -a` so these are exported, not just set as shell variables: the

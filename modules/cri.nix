@@ -23,7 +23,10 @@ in
     microvm.mem = lib.mkDefault 8192;
 
     programs.bash.interactiveShellInit = ''
-      # Seed CRI usage info into Claude Code's user-level memory (only if ~/.claude exists)
+      # Seed CRI usage info into Claude Code's user-level memory (only if
+      # ~/.claude exists). Locked against the concurrent first-boot logins that
+      # would otherwise seed it twice — see modules/base.nix.
+      exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
       if [ -d ~/.claude ]; then
         # Clean up old sudo reminder if present
         if grep -q '<!-- CRI-SUDO -->' ~/.claude/CLAUDE.md 2>/dev/null; then
@@ -47,6 +50,8 @@ configured with appropriate group permissions for the agent user.
 CRIEOF
         fi
       fi
+      exec 9>&-
+
       export CONTAINER_HOST=unix:///run/podman/podman.sock
     '';
 

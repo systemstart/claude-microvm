@@ -5,7 +5,9 @@
     launchCommand = "claude";
     extraPackages = [ pkgs.claude-code ];
     shellInit = ''
-      # Seed microVM disk-space awareness into Claude's user-level memory
+      # Seed microVM disk-space awareness into Claude's user-level memory. This
+      # runs inside base.nix's seed lock (it inlines shellInit there), so it
+      # needs no locking of its own.
       mkdir -p ~/.claude
       # Supersedes the pre-store-volume block, which told the agent that the
       # writable store lives in RAM and that clearing /tmp is the remedy.
