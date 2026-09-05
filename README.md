@@ -203,6 +203,16 @@ Each work directory gets its own virtiofsd instance, so multiple VMs can run in 
 
 The virtiofsd daemons are cleaned up automatically when the VM exits.
 
+One failure mode is worth knowing before you meet it: virtiofsd holds a file
+descriptor per inode the guest has looked up, so a large enough tree walk in the
+VM can exhaust its descriptor limit, after which every operation on the share
+fails with `Too many open files` while the guest's own counters look fine. It
+does not clear on its own and retrying makes it worse. The guest ships
+`vm-share-relieve` to recover in place —
+[docs/VIRTIOFS-GOTCHAS.md](docs/VIRTIOFS-GOTCHAS.md) has the mechanism, the
+prevention, and why the two flags usually suggested for this do not apply to a
+rootless daemon.
+
 ### Home directory persistence
 
 Agent state (sessions, credentials, settings) is stored in `$XDG_DATA_HOME/<agent>-microvm/<basename>-<hash>` (defaulting to `~/.local/share/<agent>-microvm/<basename>-<hash>`), where `<agent>` is the flavor name, `<basename>` is the first 12 chars of the project directory name, and `<hash>` is derived from the `WORK_DIR` path. Each agent has its own isolated home directory. All instances of the same agent on the same project share this directory automatically. To use a different directory, set `AGENT_HOME` explicitly:

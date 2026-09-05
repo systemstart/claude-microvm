@@ -19,6 +19,15 @@ let
     runtimeInputs = with pkgs; [ coreutils vmStorePrune ];
     text = builtins.readFile ../scripts/vm-store-autoprune.sh;
   };
+
+  # Recovery for an ENFILE-wedged virtiofs share. The guest cannot fix this
+  # without root — and without a way to fix it, the only exit is a VM restart.
+  # See docs/VIRTIOFS-GOTCHAS.md; the sudo rule below names its install path.
+  vmShareRelieve = pkgs.writeShellApplication {
+    name = "vm-share-relieve";
+    runtimeInputs = with pkgs; [ coreutils gawk ];
+    text = builtins.readFile ../scripts/vm-share-relieve.sh;
+  };
 in
 {
   imports = [ ./hardening.nix ];
@@ -238,6 +247,11 @@ in
           { command = "/run/current-system/sw/bin/poweroff"; options = [ "NOPASSWD" ]; }
           { command = "/run/current-system/sw/bin/systemctl"; options = [ "NOPASSWD" ]; }
           { command = "/run/current-system/sw/bin/journalctl"; options = [ "NOPASSWD" ]; }
+          # Drops the guest's dentry/inode caches, which is what releases the
+          # host virtiofsd's file descriptors. Narrow by design: the command
+          # takes no arguments that change what it does, and the worst it can
+          # do is make the guest's own lookups cold for a moment.
+          { command = "/run/current-system/sw/bin/vm-share-relieve"; options = [ "NOPASSWD" ]; }
         ];
       }];
     };
@@ -248,6 +262,7 @@ in
       openssh
       cacert
       vmStorePrune
+      vmShareRelieve
     ] ++ cfg.extraPackages;
 
     # Timer-driven cleanup for the writable store. Deliberately not wanted by
@@ -302,6 +317,31 @@ in
 
     programs.bash.interactiveShellInit = ''
       git config --global --add safe.directory /work 2>/dev/null || true
+
+      # ENFILE on a share is an obscure failure with a non-obvious recovery, and
+      # the agent is the one who will hit it. Seed the recognition and the fix.
+      if [ -d ~/.claude ] && ! grep -q '<!-- MICROVM-SHARE-ENFILE -->' ~/.claude/CLAUDE.md 2>/dev/null; then
+        cat >> ~/.claude/CLAUDE.md << 'SHAREEOF'
+
+<!-- MICROVM-SHARE-ENFILE -->
+# "Too many open files" on /work or /home/agent
+
+If ENFILE appears on the **shares** — not on `/` or `/nix/store` — the host's
+virtiofs daemon has run out of file descriptors. It holds one per inode this VM
+has looked up and gets it back only when this VM drops the dentry, so your own
+fd counters look perfectly healthy while every operation on the share fails.
+It does not clear on its own, and retrying makes it worse: each retry is more
+lookups.
+
+1. Stop whatever is walking the share, including your own retry loop.
+2. Run `vm-share-relieve` — it forces the cache eviction that hands the
+   descriptors back, and handles the sudo itself.
+
+Avoid unbounded traversals of `/work` in the first place: depth-limit `find`,
+and prune `node_modules`, `vendor`, module caches and rendered output. Prefer
+explicit path lists over discovery in anything that iterates repositories.
+SHAREEOF
+      fi
 
       ${cfg.shellInit}
 

@@ -531,6 +531,10 @@
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
         };
+        share-recovery = import ./tests/share-recovery.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
       });
     };
 }
