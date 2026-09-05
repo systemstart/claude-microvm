@@ -389,6 +389,7 @@ Rebuild with `make claude`.
 |----------|-------------|---------|
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `AGENT_HOME` | Host directory for agent state (mounted at `/home/agent`) | `$XDG_DATA_HOME/<agent>-microvm/<hash>` |
+| `AGENT_SETTINGS` | Host path to a settings file seeded into the agent home before boot (flavor-specific destination, e.g. `.claude/settings.json`) — see [Pre-seeding agent settings](#pre-seeding-agent-settings) | (none) |
 | `VM_MEM` | VM memory in MB | `8192` |
 | `VM_VCPU` | VM vCPU count | `4` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
@@ -401,6 +402,28 @@ Rebuild with `make claude`.
 | `EXTRA_CA_CERTS` | Path to a PEM file or directory of PEM files containing custom CA certificates to trust inside the VM | (system CAs only) |
 | `EXTRA_ENV` | Extra environment variables to forward into the VM, comma-separated. `FOO=bar` assigns a literal value; a bare `FOO` forwards `$FOO` from the host environment (keeps secrets off the command line). | (none) |
 | `AGENTS_ARGS` | Extra arguments appended to the agent launch command. Use for one-shot prompts (e.g. `'-p "summarize this repo"'`) or to enable dangerous flags (e.g. `--dangerously-skip-permissions`). Re-parsed via `eval`, so quoting works. | (none) |
+
+### Pre-seeding agent settings
+
+A fresh workspace starts the agent with its default configuration. To start
+from your own instead, point `AGENT_SETTINGS` at a settings file on the host:
+
+```sh
+AGENT_SETTINGS=~/dotfiles/claude-settings.json make claude.run
+```
+
+It lands at the flavor's own config path inside the agent home —
+`.claude/settings.json` for Claude Code, `.gemini/settings.json` for Gemini,
+`.codex/config.toml` for Codex (JSON destinations are validated before boot;
+the `pi` flavor has no supported settings path and warns). This is a **seed,
+not a sync**: the file is copied when missing and re-copied only when the host
+file changes, so settings changed inside the VM persist across launches until
+you edit the host copy — at which point the host version replaces the file
+wholesale. A pre-existing file the seeding never wrote is backed up once as
+`*.pre-seed` before being replaced.
+
+It is also convenience, not enforcement — the guest can rewrite the file
+mid-session like any other agent-home state.
 
 ### Writable Nix store disk
 

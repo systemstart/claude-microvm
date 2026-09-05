@@ -35,13 +35,13 @@
       forSystems = lib.genAttrs linuxSystems;
 
       vmFlavors = {
-        claude = { suffix = "";        agentModule = ./modules/agents/claude.nix; dataDirName = "claude-microvm"; apiKeyVars = [ "ANTHROPIC_API_KEY" ]; };
-        gemini = { suffix = "-gemini"; agentModule = ./modules/agents/gemini.nix; dataDirName = "gemini-microvm"; apiKeyVars = [ "GEMINI_API_KEY" ]; };
-        codex  = { suffix = "-codex";  agentModule = ./modules/agents/codex.nix;  dataDirName = "codex-microvm";  apiKeyVars = [ "OPENAI_API_KEY" ]; };
-        pi     = { suffix = "-pi";    agentModule = ./modules/agents/pi.nix;    dataDirName = "pi-microvm";    apiKeyVars = [ "ANTHROPIC_API_KEY" "OPENAI_API_KEY" "GEMINI_API_KEY" ]; };
+        claude = { suffix = "";        agentModule = ./modules/agents/claude.nix; dataDirName = "claude-microvm"; apiKeyVars = [ "ANTHROPIC_API_KEY" ]; settingsFile = ".claude/settings.json"; };
+        gemini = { suffix = "-gemini"; agentModule = ./modules/agents/gemini.nix; dataDirName = "gemini-microvm"; apiKeyVars = [ "GEMINI_API_KEY" ]; settingsFile = ".gemini/settings.json"; };
+        codex  = { suffix = "-codex";  agentModule = ./modules/agents/codex.nix;  dataDirName = "codex-microvm";  apiKeyVars = [ "OPENAI_API_KEY" ]; settingsFile = ".codex/config.toml"; };
+        pi     = { suffix = "-pi";    agentModule = ./modules/agents/pi.nix;    dataDirName = "pi-microvm";    apiKeyVars = [ "ANTHROPIC_API_KEY" "OPENAI_API_KEY" "GEMINI_API_KEY" ]; settingsFile = null; };
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -148,6 +148,50 @@
           mkdir -p "$AGENT_DIR"
         fi
         AGENT_TEMP=""
+
+        # --- Agent settings seed ---
+        ${if settingsFile != null then ''
+        # AGENT_SETTINGS pre-seeds the agent's own config file into the agent
+        # home before boot, so a fresh workspace starts with your settings
+        # instead of the agent's defaults. Seed, not sync: the copy happens when
+        # the destination is missing or when the *source* has changed since the
+        # last seed (hash sidecar), so settings changed inside the VM persist
+        # across launches until the host file moves — at which point the host
+        # wins, whole-file. This is convenience, not enforcement: the guest can
+        # rewrite the file mid-session like any other agent-home state.
+        if [ -n "''${AGENT_SETTINGS:-}" ]; then
+          if [ ! -f "$AGENT_SETTINGS" ]; then
+            echo "error: AGENT_SETTINGS=$AGENT_SETTINGS is not a file" >&2
+            exit 1
+          fi
+          ${lib.optionalString (lib.hasSuffix ".json" settingsFile) ''
+          # A malformed settings file would not fail loudly in the guest — the
+          # agent just behaves as if unconfigured. Catch it before boot.
+          if ! ${pkgs.jq}/bin/jq empty "$AGENT_SETTINGS" 2>/dev/null; then
+            echo "error: AGENT_SETTINGS=$AGENT_SETTINGS is not valid JSON" >&2
+            exit 1
+          fi''}
+          _SETTINGS_DEST="$AGENT_DIR/${settingsFile}"
+          _SETTINGS_HASH="$(sha256sum < "$AGENT_SETTINGS" | cut -c1-16)"
+          _SEEDED_HASH=""
+          [ -f "$AGENT_DIR/.microvm-settings.hash" ] && _SEEDED_HASH="$(cat "$AGENT_DIR/.microvm-settings.hash")"
+          if [ ! -f "$_SETTINGS_DEST" ] || [ "$_SETTINGS_HASH" != "$_SEEDED_HASH" ]; then
+            if [ -f "$_SETTINGS_DEST" ] && [ -z "$_SEEDED_HASH" ]; then
+              # The destination exists but was never seeded by us: it was
+              # written inside a VM. Passing AGENT_SETTINGS says "use mine",
+              # but destroying the only copy silently would be rude.
+              cp "$_SETTINGS_DEST" "$_SETTINGS_DEST.pre-seed"
+              echo "note: replacing existing ${settingsFile} (backup: ${settingsFile}.pre-seed)"
+            fi
+            mkdir -p "$(dirname "$_SETTINGS_DEST")"
+            install -m 600 "$AGENT_SETTINGS" "$_SETTINGS_DEST"
+            echo "$_SETTINGS_HASH" > "$AGENT_DIR/.microvm-settings.hash"
+            echo "seeded ${settingsFile} from $AGENT_SETTINGS"
+          fi
+        fi'' else ''
+        if [ -n "''${AGENT_SETTINGS:-}" ]; then
+          echo "warning: AGENT_SETTINGS is not supported for the ${agentName} flavor — ignored" >&2
+        fi''}
 
         # --- CRI storage volume (ext4 block image) ---
         # Container runtimes need a real block-backed fs that permits lchown to
@@ -540,7 +584,7 @@
           runner = nixosCfg.microvm.runner.qemu;
         in mkRunnerScript {
           inherit pkgs runner;
-          inherit (flavor) dataDirName apiKeyVars;
+          inherit (flavor) dataDirName apiKeyVars settingsFile;
           agentName = name;
           defaultMem = nixosCfg.claude-vm.agent.mem;
           defaultVcpu = nixosCfg.claude-vm.agent.vcpu;
