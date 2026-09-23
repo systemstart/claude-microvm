@@ -1,9 +1,22 @@
-{ pkgs, ... }:
+{ pkgs, lib, ... }:
+let
+  # nixos-unstable routinely trails upstream Claude Code by a few releases, and
+  # new models are gated on a minimum CLI version (e.g. Opus 5.5 needs 2.1.280).
+  # Feed nixpkgs' own derivation a newer release manifest when the locked
+  # nixpkgs is behind; once it catches up, the stock package wins again and
+  # this pin becomes a no-op.
+  pinnedManifest = lib.importJSON ./claude-code-manifest.json;
+  claude-code =
+    if lib.versionOlder pkgs.claude-code.version pinnedManifest.version then
+      pkgs.claude-code.override { manifest = pinnedManifest; }
+    else
+      pkgs.claude-code;
+in
 {
   claude-vm.agent = {
     name = "claude";
     launchCommand = "claude";
-    extraPackages = [ pkgs.claude-code ];
+    extraPackages = [ claude-code ];
     shellInit = ''
       # Seed microVM disk-space awareness into Claude's user-level memory. This
       # runs inside base.nix's seed lock (it inlines shellInit there), so it
