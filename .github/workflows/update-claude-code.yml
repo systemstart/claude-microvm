@@ -1,0 +1,79 @@
+name: Update Claude Code
+
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release to move to: latest, stable or an exact version"
+        default: latest
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: update-claude-code
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: bump
+        env:
+          TARGET: ${{ inputs.version || 'latest' }}
+        run: scripts/update-claude-code.sh "$TARGET"
+
+      # Plain git and gh (both preinstalled on the runner) rather than a
+      # third-party action: this step holds a token that can write to the repo.
+      - if: steps.bump.outputs.version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.repository.default_branch }}
+          PREVIOUS: ${{ steps.bump.outputs.previous }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          branch=update/claude-code
+          file=modules/agents/claude-code-manifest.json
+
+          # Every run after the first would otherwise force-push the same
+          # change again while the PR waits for review.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch --quiet origin "$branch"
+            if git diff --quiet FETCH_HEAD -- "$file"; then
+              echo "claude-code $VERSION is already proposed on $branch"
+              exit 0
+            fi
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --quiet -C "$branch"
+          git commit --quiet -m "chore(deps): update claude-code to $VERSION" -- "$file"
+          git push --quiet --force origin "$branch"
+
+          title="chore(deps): update claude-code to $VERSION"
+          cat > "$RUNNER_TEMP/body.md" <<BODY
+          Moves \`$file\` from $PREVIOUS to $VERSION.
+
+          The manifest was downloaded from \`downloads.claude.ai\`, its signature checked against the release key pinned in \`scripts/claude-code-release-key.asc\`, and it is committed byte for byte. To check it yourself:
+
+          \`\`\`sh
+          curl -fsSLO https://downloads.claude.ai/claude-code-releases/$VERSION/manifest.zst.json.sig
+          gpg --import scripts/claude-code-release-key.asc
+          gpg --verify manifest.zst.json.sig $file
+          \`\`\`
+
+          Changelog: https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md
+          BODY
+
+          pr="$(gh pr list --head "$branch" --base "$BASE" --state open --json number --jq '.[0].number')"
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh pr create --head "$branch" --base "$BASE" --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
