@@ -94,6 +94,38 @@
         SOCK="$RUNTIME/$VM_ID-virtiofs-$ID.sock"
         UNIT="$VM_ID-virtiofsd-$ID"
         STATE="$RUNTIME/$VM_ID-virtiofsd-$ID.workdir"
+        AGENT_SOCK="$RUNTIME/$VM_ID-virtiofs-$ID-agent-home.sock"
+        AGENT_UNIT="$VM_ID-virtiofsd-$ID-agent-home"
+        AGENT_STATE="$RUNTIME/$VM_ID-virtiofsd-$ID-agent-home.dir"
+        AGENT_TEMP=""
+        STORE_IMG=""
+        STORE_STATE_DIR=""
+
+        # Installed before the first daemon starts, so a refusal anywhere below
+        # (a bad AGENT_SETTINGS, say) cannot leave a virtiofsd running and
+        # exporting a host directory with nothing to stop it. Everything it
+        # touches is initialised above for that reason.
+        # virtiofsd removes neither its socket nor its `<socket>.pid` when
+        # stopped with SIGTERM, which is what `systemctl stop` sends — so both
+        # are removed here, or every launch leaves them in $RUNTIME.
+        cleanup() {
+          ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
+          ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
+          for _s in "$SOCK" "$AGENT_SOCK"; do
+            rm -f "$_s" "$_s.pid"
+          done
+          rm -f "$STATE" "$AGENT_STATE"
+          if [ -n "$STORE_IMG" ]; then
+            rm -f "$STORE_IMG"
+            # Leave nothing behind on the host: the dir is ours and the image is
+            # gone, so drop it unless something else put files there.
+            rmdir "$STORE_STATE_DIR" 2>/dev/null || true
+          fi
+          if [ -n "$AGENT_TEMP" ]; then
+            rm -rf "$AGENT_TEMP"
+          fi
+        }
+        trap cleanup EXIT
 
         # (Re)start virtiofsd if not running or WORK_DIR changed
         NEED_START=1
@@ -134,10 +166,6 @@
         fi
 
         # --- Agent home share (virtiofsd) ---
-        AGENT_SOCK="$RUNTIME/$VM_ID-virtiofs-$ID-agent-home.sock"
-        AGENT_UNIT="$VM_ID-virtiofsd-$ID-agent-home"
-        AGENT_STATE="$RUNTIME/$VM_ID-virtiofsd-$ID-agent-home.dir"
-
         if [ -z "''${AGENT_HOME:-}" ]; then
           DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
           WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
@@ -147,7 +175,6 @@
         if [ ! -d "$AGENT_DIR" ]; then
           mkdir -p "$AGENT_DIR"
         fi
-        AGENT_TEMP=""
 
         # --- Agent settings seed ---
         ${if settingsFile != null then ''
@@ -259,20 +286,6 @@
         STORE_IMG="$STORE_STATE_DIR/nix-store-overlay.img"
         rm -f "$STORE_IMG"
         ''}
-
-        cleanup() {
-          ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
-          ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
-          rm -f "$SOCK" "$AGENT_SOCK" "$STATE" "$AGENT_STATE"
-          ${lib.optionalString storeDiskBacked ''rm -f "$STORE_IMG"
-          # Leave nothing behind on the host: the dir is ours and the image is
-          # gone, so drop it unless something else put files there.
-          rmdir "$STORE_STATE_DIR" 2>/dev/null || true''}
-          if [ -n "$AGENT_TEMP" ]; then
-            rm -rf "$AGENT_TEMP"
-          fi
-        }
-        trap cleanup EXIT
 
         AGENT_NEED_START=1
         if ${pkgs.systemd}/bin/systemctl --user is-active "$AGENT_UNIT" &>/dev/null; then
