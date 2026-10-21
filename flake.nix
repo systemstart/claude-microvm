@@ -58,13 +58,14 @@
       # <prefix> on the proxy, which strips client-supplied credentials and
       # injects $<keyVar> as <header> upstream — or passes the client's own
       # token through when the var is unset on the host (OAuth mode).
-      # allowedPaths is a per-host capability grant; shadow mode's audit log
+      # allowedPaths is a per-host capability grant (an entry covers its
+      # subtree; a trailing $ only that exact path); shadow mode's audit log
       # is how it gets extended when a client needs more.
       # usage names the proxy's token parser for the endpoint's responses
       # (only "anthropic" exists): set, the session's tokens are counted, and
       # API_BUDGET_TOKENS can cap them; unset, only requests are.
       egressEndpoints = rec {
-        claude = [ { prefix = "/anthropic"; upstream = "https://api.anthropic.com"; keyVar = "ANTHROPIC_API_KEY"; header = "x-api-key"; baseUrlVar = "ANTHROPIC_BASE_URL"; allowedPaths = [ "/v1/messages" ]; usage = "anthropic"; } ];
+        claude = [ { prefix = "/anthropic"; upstream = "https://api.anthropic.com"; keyVar = "ANTHROPIC_API_KEY"; header = "x-api-key"; baseUrlVar = "ANTHROPIC_BASE_URL"; allowedPaths = [ "/v1/messages$" "/v1/messages/count_tokens$" ]; usage = "anthropic"; } ];
         gemini = [ { prefix = "/gemini"; upstream = "https://generativelanguage.googleapis.com"; keyVar = "GEMINI_API_KEY"; header = "x-goog-api-key"; baseUrlVar = "GOOGLE_GEMINI_BASE_URL"; allowedPaths = [ "/v1beta/models" "/v1/models" ]; } ];
         codex  = [ { prefix = "/openai"; upstream = "https://api.openai.com"; keyVar = "OPENAI_API_KEY"; header = "authorization"; baseUrlVar = "OPENAI_BASE_URL"; allowedPaths = [ "/v1/responses" "/v1/chat/completions" "/v1/models" ]; } ];
         pi = claude ++ gemini ++ codex;
