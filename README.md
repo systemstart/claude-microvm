@@ -614,6 +614,7 @@ Rebuild with `make claude`.
 | `NO_PAUSE` | Set to `1` to boot immediately instead of waiting for Enter on the session contract (the contract still prints). **The wait is the default since v0.16.0**: set this for any automation that runs the launcher on a terminal (tmux, `expect`, `script`, IDE tasks). Already skipped when stdin is not a terminal (pipes, cron); a one-shot `AGENTS_ARGS=-p …` run from a terminal still waits | (pause) |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
 | `CRI_STORAGE_SIZE` | Cap on the CRI storage disk in MiB, applied when the image is first created. Sparse, so it is a ceiling rather than an allocation. `0` runs without the disk entirely. The disk is only *created* when `ENABLE_CRI` is set — see [Container runtime support](#container-runtime-support) | `30720` (30 GiB) |
+| `REGISTRY_MIRRORS` | Registry mirrors for the container runtimes, comma-separated `<registry>=http[s]://<host>[:<port>]`, e.g. `docker.io=http://10.0.2.2:5101`. Each runtime tries the mirror first and falls back to the registry. Ignored under `shadow`/`enforce` — see [Registry mirrors](#registry-mirrors) | (none) |
 | `VM_STORE_SIZE` | Cap on the writable Nix store disk in MiB. Sparse, and recreated on every launch, so it applies to every run. Minimum 1024; `0` is rejected — see [Leaving nothing on the host](#leaving-nothing-on-the-host) | `10240` (10 GiB) |
 | `ANTHROPIC_API_KEY` | API key for Claude Code (claude flavor) | — |
 | `GEMINI_API_KEY` | API key for Gemini CLI (gemini flavor) | — |
@@ -889,6 +890,41 @@ kubectl get --raw /api 2>/dev/null || echo "no API server — use crictl for CRI
 > unconditionally enters a rootless-containerd code path when UID != 0 and
 > fails before it ever reads the socket address. Use `docker`, `crictl`, or
 > `ctr` instead.
+
+#### Registry mirrors
+
+`REGISTRY_MIRRORS` points the runtimes at mirrors — typically pull-through
+caches on the host, which a guest reaches through the slirp gateway at
+`10.0.2.2`:
+
+```sh
+REGISTRY_MIRRORS="docker.io=http://10.0.2.2:5101,ghcr.io=http://10.0.2.2:5102" \
+  ENABLE_CRI=docker,podman make claude.run
+```
+
+A boot service (`cri-registry-mirrors`) turns it into each runtime's own
+config before any daemon starts:
+
+| Runtime | Written | Mirrors |
+|---|---|---|
+| containerd, crun (CRI, `crictl`) | `/etc/containerd/certs.d/<registry>/hosts.toml` | every listed registry |
+| Podman, CRI-O | `/etc/containers/registries.conf.d/50-registry-mirrors.conf` | every listed registry |
+| Docker | `--registry-mirror` on `dockerd` | `docker.io` only — dockerd has no mirror setting for any other registry |
+
+Every runtime tries the mirror first and falls back to the registry itself, so
+a mirror that is down costs only the cache. An `http://` mirror is marked
+insecure for Podman and CRI-O, and needs no extra setting elsewhere. `ctr`
+reads the same `hosts.toml` files when given `--hosts-dir
+/etc/containerd/certs.d`. The guest's `/etc` is on its tmpfs root, so none of
+this outlives the session.
+
+Under `EGRESS_POLICY=shadow` or `enforce` the setting is ignored with a
+warning: the seal blocks direct connections, so the mirrors would only ever be
+fallen back from, and pulls already go through the egress proxy.
+
+Not covered: containers that pull images themselves, and KinD — its nodes run
+their own containerd, which reads its own config. The node *images* do come
+through Docker's or Podman's mirror.
 
 #### CNI networking
 
