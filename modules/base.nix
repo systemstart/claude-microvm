@@ -1,7 +1,8 @@
-{ pkgs, lib, config, ... }:
+{ pkgs, lib, config, utils, ... }:
 let
   cfg = config.claude-vm.agent;
   storeCfg = config.claude-vm.store;
+  instance = config.claude-vm.instance;
 
   # Reclaiming space in the writable store is a footgun here — `nix-collect-garbage`
   # walks every host path visible through the overlay's lower layer and writes a
@@ -142,6 +143,32 @@ in
     };
   };
 
+  # Where the launcher's per-launch files appear in the guest. They are written
+  # for this one launch into a host directory of its own and exported read-only,
+  # so the guest — root included — cannot change them, and launches sharing an
+  # agent home cannot see or overwrite each other's. Read-only options: the
+  # launcher's share, the guest services that read the files and microvm-policy's
+  # stateFile all have to agree on them.
+  options.claude-vm.instance = {
+    dir = lib.mkOption {
+      type = lib.types.str;
+      default = "/run/microvm";
+      readOnly = true;
+      description = ''
+        Guest mount point of the per-launch, read-only instance share: `env`
+        (what the launcher passes the guest), `ca-certs/` (EXTRA_CA_CERTS) and
+        `nix-db.sqlite` (the host's nix DB snapshot).
+      '';
+    };
+    mountUnit = lib.mkOption {
+      type = lib.types.str;
+      default = "${utils.escapeSystemdPath config.claude-vm.instance.dir}.mount";
+      defaultText = lib.literalExpression ''"run-microvm.mount"'';
+      readOnly = true;
+      description = "The systemd mount unit for `dir`; readers of the share are ordered after it.";
+    };
+  };
+
   config = {
     nixpkgs.config.allowUnfree = true;
 
@@ -191,6 +218,17 @@ in
           mountPoint = "/home/agent";
           proto = "virtiofs";
         }
+        {
+          # Per-launch and read-only — see options.claude-vm.instance. The
+          # launcher's virtiofsd for it runs with --readonly, which is what
+          # holds against root in the guest; readOnly here documents it, and
+          # the `ro` mount option below makes a write fail locally first.
+          tag = "instance";
+          source = "/tmp/${cfg.name}-vm-instance";
+          mountPoint = instance.dir;
+          proto = "virtiofs";
+          readOnly = true;
+        }
       ];
 
       # Use virtio-console (hvc0) instead of serial (ttyS0) for the
@@ -205,6 +243,10 @@ in
         "-device" "virtio-net-device,netdev=usernet"
       ];
     };
+
+    # microvm.nix mounts every virtiofs share with `defaults`, whatever its
+    # readOnly says, and `defaults` includes `rw` — so `ro` goes after it.
+    fileSystems.${instance.dir}.options = lib.mkAfter [ "ro" ];
 
     users.groups.agent.gid = 1000;
     users.users.agent = {
@@ -358,10 +400,11 @@ SHAREEOF
       cd /work 2>/dev/null || true
       # `set -a` so these are exported, not just set as shell variables: the
       # agent runs as a child process below and would not otherwise inherit
-      # API keys or anything forwarded via EXTRA_ENV.
-      if [ -f ~/.microvm-env ]; then
+      # API keys or anything forwarded via EXTRA_ENV. The file is this launch's
+      # own, on the read-only instance share.
+      if [ -f ${instance.dir}/env ]; then
         set -a
-        source ~/.microvm-env
+        source ${instance.dir}/env
         set +a
       fi
       if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
@@ -421,7 +464,7 @@ SHAREEOF
 
     systemd.services.microvm-ca-certs = {
       description = "Inject custom CA certificates into system trust store";
-      after = [ "home-agent.mount" ];
+      after = [ instance.mountUnit ];
       before = [ "getty@hvc0.service" "nix-daemon.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
@@ -429,7 +472,7 @@ SHAREEOF
         RemainAfterExit = true;
       };
       script = ''
-        CA_DIR="/home/agent/.microvm-ca-certs"
+        CA_DIR="${instance.dir}/ca-certs"
         [ ! -d "$CA_DIR" ] && exit 0
 
         CERTS=$(find "$CA_DIR" -maxdepth 1 -type f 2>/dev/null)
@@ -477,7 +520,7 @@ SHAREEOF
     # the socket — leaving nix-daemon unreachable.
     systemd.services.microvm-import-nix-db = {
       description = "Import host nix store DB snapshot";
-      after = [ "home-agent.mount" ];
+      after = [ instance.mountUnit ];
       before = [ "nix-daemon.service" ];
       wantedBy = [ "nix-daemon.service" ];
       serviceConfig = {
@@ -485,7 +528,7 @@ SHAREEOF
         RemainAfterExit = true;
       };
       script = ''
-        SRC=/home/agent/.microvm-nix-db.sqlite
+        SRC=${instance.dir}/nix-db.sqlite
         DST=/nix/var/nix/db/db.sqlite
         if [ -f "$SRC" ]; then
           install -m 0644 "$SRC" "$DST"
