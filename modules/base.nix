@@ -565,7 +565,11 @@ SHAREEOF
     systemd.services.microvm-ca-certs = {
       description = "Inject custom CA certificates into system trust store";
       after = [ instance.mountUnit ];
-      before = [ "getty@hvc0.service" "nix-daemon.service" ];
+      # Every login waits for systemd-user-sessions, whatever its terminal, so
+      # the agent never starts against a bundle without these. (The console's
+      # getty is serial-getty@hvc0, from the generator; getty@hvc0, named here
+      # before, never runs.)
+      before = [ "systemd-user-sessions.service" "nix-daemon.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";
