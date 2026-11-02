@@ -230,7 +230,7 @@ target architecture, not just the host's).
 
 ### virtiofs (host directory sharing)
 
-The host `WORK_DIR` is shared into the VM at `/work` using virtiofs. A `virtiofsd` daemon is started automatically as a systemd user service (`<basename>-<agent>-vm-virtiofsd-<id>`, where `<basename>` is the project directory name and `<id>` is a random instance UUID) — no root or sudo needed. It runs unprivileged in a user namespace with UID/GID translation so files created inside the VM are owned by your host user.
+The host `WORK_DIR` is shared into the VM at `/work` using virtiofs. A `virtiofsd` daemon is started automatically as a systemd user service (`claude_microvm-<id>-work`, where `<id>` is the launch's random 12-hex-digit ID; see [Launch scope](#launch-scope)) — no root or sudo needed. It runs unprivileged in a user namespace with UID/GID translation so files created inside the VM are owned by your host user.
 
 Each work directory gets its own virtiofsd instance, so multiple VMs can run in parallel on different projects. Multiple VMs on the **same** project also work automatically — each launch gets a random instance ID with its own virtiofsd daemons and sockets.
 
@@ -289,6 +289,152 @@ AGENT_HOME=~/.my-agent-home make claude.run
 
 This mounts the host directory at `/home/agent` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping.
 
+### Per-launch instance directory
+
+Each launch keeps what is its alone in one directory under the runtime dir:
+
+```
+$XDG_RUNTIME_DIR/claude-microvm/          one root for every flavor
+  vms/<id>/                               this launch; owner-only; <id> is 12 hex digits
+    guest/                                exported read-only at /run/microvm
+      env  ca-certs/  nix-db.sqlite
+    instance.json                         what this launch is (see below)
+    lock                                  held while the launch runs
+    qmp.sock                              QEMU's QMP control socket
+    work.sock  agent-home.sock  guest.sock    the three virtiofsd sockets
+    egress.port  egress.json              EGRESS_POLICY=shadow|enforce
+```
+
+Only `guest/` reaches the guest. It holds what the launch hands the guest,
+which used to live in agent home — a directory shared by every launch on the
+project and writable from each guest:
+
+| in the guest | what |
+|---|---|
+| `/run/microvm/env` | the values the launcher passes in — API keys, `EXTRA_ENV`, `ENABLE_CRI`, the egress settings — sourced by the agent's shell and read as data by the guest's services |
+| `/run/microvm/ca-certs/` | `EXTRA_CA_CERTS` |
+| `/run/microvm/nix-db.sqlite` | the snapshot of the host's Nix database the guest imports at boot |
+
+Its virtiofsd runs with `--readonly`, so nothing in the guest — root included —
+can change these files, and two VMs on the same project each see only their
+own. The runtime dir is tmpfs, so the env file's API keys never reach a disk.
+The directory is removed when the launch exits, whether the VM shut down,
+failed or never started; if the launcher itself is killed, what is left goes
+at logout or reboot. `claude-microvm/` and `vms/` themselves stay, empty,
+until then: launches share them, and one exiting must not remove them from
+under one starting. Launchers before this kept the guest's three files in
+agent home as `.microvm-env`, `.microvm-ca-certs` and `.microvm-nix-db.sqlite`;
+the first launch that has this removes them.
+
+Once written, the launch's files are read-only on the host too — everything in
+`guest/`, `instance.json` and `lock` (files 0400, directories 0500) — so an
+editor or a stray redirect cannot change them by accident, and
+`instance.json` is put in place whole. Removing a directory a killed launcher
+left behind therefore takes `chmod -R u+w` first. Nothing here stops a
+deliberate change by your own user, and nothing needs to: `microvm-stop` takes
+a launch's QMP socket from the layout (`vms/<id>/qmp.sock`), not from
+`instance.json`, and refuses an `instance.json` whose `id` is not its
+directory's name.
+
+A launch's directory is named by its ID alone, like its systemd units, so a
+tool with an ID has the path: `$XDG_RUNTIME_DIR/claude-microvm/vms/<id>/`.
+`instance.json` there says what the launch is — its project, flavor, sockets
+and units:
+
+```sh
+jq . "$XDG_RUNTIME_DIR"/claude-microvm/vms/*/instance.json
+# {"version":1,"pid":…,"flavor":"claude","vmId":…,"id":…,"started":…,
+#  "work":…,"agentHome":…,"guest":…,"guestMount":"/run/microvm",
+#  "egressPolicy":"open",
+#  "sockets":{"qmp":…,"work":…,"agentHome":…,"guest":…},
+#  "slice":"claude_microvm.slice",
+#  "units":{"scope":…,"work":…,"agentHome":…,"guest":…,"egress":null}}
+```
+
+`units` are the `systemctl --user` units the launch runs (see
+[Launch scope](#launch-scope)); `egress` is set only under
+`EGRESS_POLICY=alert|shadow|enforce`, which run something on the host, and
+`scope` is null if the launch could not have one.
+
+The QMP socket gives full control of the VM, e.g.
+`echo '{"execute":"qmp_capabilities"}{"execute":"query-status"}' | socat - UNIX-CONNECT:<qmp.sock>`.
+microvm.nix's own `microvm-shutdown` and `microvm-balloon` helpers still look
+for a relative `claude-vm.sock`, so they do not work with this launcher; use
+`microvm-stop` (below) to stop a VM.
+
+The launcher refuses to start without a runtime dir (`XDG_RUNTIME_DIR`, or
+`/run/user/<uid>`), or with one long enough to push a socket path past the
+107-byte limit.
+
+### Stopping a VM from outside
+
+`microvm-stop` ships beside `microvm-run` (`./result/bin/microvm-stop` after
+`make`, or `nix run .#microvm-stop`), and the session contract names it with
+the launch's ID:
+
+```sh
+microvm-stop <id>              # press the VM's power button and wait for it to go
+microvm-stop                   # the same, for the only running launch
+microvm-stop --force <id>      # stop QEMU at once, with no shutdown in the guest
+```
+
+It presses the power button over the launch's QMP socket, so the guest shuts
+down cleanly and the launcher then cleans up as after any VM exit. It waits
+until the launch has gone (60 s by default, `--timeout` to change), and
+says so if the guest ignores the button — `--force` is for that case. It works
+the same for every launch, with a [launch scope](#launch-scope) or without.
+
+### Launch scope
+
+Each launch's systemd user units share one name, `claude_microvm-<id>`, and a
+slice of their own, nested in `claude_microvm.slice`:
+
+```
+claude_microvm.slice
+  claude_microvm-<id>.slice                 one launch
+    claude_microvm-<id>.scope               the launcher and QEMU
+    claude_microvm-<id>-work.service        virtiofsd for /work
+    claude_microvm-<id>-agent-home.service  virtiofsd for agent home
+    claude_microvm-<id>-guest.service       virtiofsd for the read-only guest share
+    claude_microvm-<id>-egress.service      the egress proxy or follower, when the policy runs one
+```
+
+The scope holds the VM's processes, and the slice the whole launch, so each
+is accounted together. The unit names carry only the ID — the slice does not
+namespace them, and the ID is what keeps two launches apart — and each unit's
+description says what it is and for which project, which is what
+`systemctl --user list-units` shows beside it:
+
+```sh
+systemctl --user status claude_microvm.slice          # every running VM and its daemons
+systemctl --user status claude_microvm-<id>.slice     # one launch
+systemctl --user stop claude_microvm-<id>.slice       # hard stop of a scoped launch; the launcher still cleans up
+journalctl MICROVM_ID=<id>                            # every daemon's log for one launch
+```
+
+Stopping the slice kills QEMU outright, with no shutdown in the guest, like
+`microvm-stop --force`. Without a scope it would also go wrong: the launcher
+and QEMU are not in the slice then, so it would stop only the daemons and
+leave the VM running on shares that have gone. Prefer `microvm-stop`.
+
+A launch's slice is made on first use and, once empty, stays until logout —
+whether a launch is still running is for `instance.json` and its lock to say,
+not the slice.
+
+The binding is what keeps a killed launcher from leaving its daemons behind.
+The launcher's cleanup stops them on any normal exit, `systemctl stop`, or a
+closed terminal, but nothing runs it on `SIGKILL` (or the OOM killer). systemd
+then stops the daemons itself once the scope empties — that is, once QEMU has
+exited too, since a VM that outlives its launcher still needs its shares. Its
+instance directory is left in the runtime dir in that case, and goes at logout
+or reboot.
+
+If systemd refuses the launcher a scope — systemd 261 grants one from a login
+session and even from a system service, but other versions and setups may
+not — the launch goes ahead without one, with a warning: its daemons are then
+in its slice but not bound to anything, and `microvm-stop` is the way to stop
+it.
+
 ### Sandboxing
 
 The VM provides strong isolation from the host:
@@ -299,9 +445,11 @@ The VM provides strong isolation from the host:
 - **Network** — QEMU user-mode NAT; the VM can reach the internet but can't bind host ports. `EGRESS_POLICY=monitor|alert` records everything the guest talks to from the host side; `EGRESS_POLICY=shadow|enforce` seals the netdev behind a host-side proxy that holds the API keys — see [Egress policy](#egress-policy)
 
 Every launch prints a **session contract** before boot: project path and mount
-mode, whether the dev shell evaluated the project's Nix code on the host,
-workspace guard, egress mode, which env vars reach the guest (names only,
-never values), container state, and resources — so what a run can reach is
+mode, agent home, the [guest share](#per-launch-instance-directory) and what
+this launch put in it, whether the dev shell evaluated the project's Nix code
+on the host, workspace guard, egress mode, which env vars reach the guest
+(names only, never values), container state, resources, and the launch's ID
+with the command that stops it — so what a run can reach is
 visible while it is still cheap to stop. Each row carries a status dot (green:
 contained, yellow: worth knowing, red: the host is exposed) and a hint at the
 knob that changes it; colour is off without a terminal or with `NO_COLOR` set.
@@ -566,8 +714,11 @@ can interpolate environment variables, this is also the way to point an agent at
 a private or self-hosted endpoint — the token stays on the host and nothing
 endpoint-specific is baked into the image.
 
-> Values are written to `.microvm-env` (mode `600`) in the agent home directory
-> and are readable by anything running in the guest, including the agent itself.
+> Values are written to `/run/microvm/env` (mode `400`, on the read-only
+> [instance share](#per-launch-instance-directory)) and are readable by the agent
+> and by root in the guest. Nothing in the guest can change them, and the
+> guest's root services never source the file: they read only the keys they
+> need, as plain text.
 
 ## Customization
 
@@ -742,7 +893,9 @@ and what you can do about each:
 |---|---|---|
 | `$AGENT_HOME-cri/cri-storage.img` | persistent, ~133 MiB minimum, grows to the cap | not created unless `ENABLE_CRI` is set; `CRI_STORAGE_SIZE=0` also detaches an existing one |
 | `$AGENT_HOME-store/nix-store-overlay.img` | per-run, ~69 MiB, deleted on exit along with its directory | build-time only: `claude-vm.store.diskBacked = false` |
-| `$AGENT_HOME` (agent state, dev-shell cache, nix DB snapshot ~97 MiB) | persistent | point `AGENT_HOME` somewhere disposable |
+| `$XDG_RUNTIME_DIR/claude-microvm/vms/<id>/` (env file with API keys, CA certs, nix DB snapshot ~97 MiB; sockets) | per-run, on tmpfs, deleted on exit — or at logout/reboot if the launcher is killed | — |
+| `$XDG_RUNTIME_DIR/claude-microvm/` and its `vms/`, empty | on tmpfs, until logout/reboot | — |
+| `$AGENT_HOME` (agent state, dev-shell cache) | persistent | point `AGENT_HOME` somewhere disposable |
 
 The CRI disk used to be created on every launch whether or not `ENABLE_CRI` was
 set, and it is never deleted. It is now only created for a run that asks for

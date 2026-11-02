@@ -66,16 +66,25 @@
       # Where the guest reaches the proxy: a slirp-internal address that
       # guestfwd maps onto the host-side listener. Chosen to dodge 10.0.2.2
       # (host), 10.0.2.3 (DNS) and 10.0.2.15 (guest). microvm-policy's
-      # egress module ssh wrapper learns it from EGRESS_PROXY_ADDR in
-      # .microvm-env.
+      # egress module ssh wrapper learns it from EGRESS_PROXY_ADDR in the
+      # launcher's env file.
       egressGuestAddr = "10.0.2.100:3128";
+
+      # Stops a running launch from outside the VM by pressing its power button
+      # over QMP; flavor-independent, since every launch's instance dir is
+      # under the same root. See scripts/microvm-stop.sh.
+      mkMicrovmStop = pkgs: pkgs.writeShellApplication {
+        name = "microvm-stop";
+        runtimeInputs = with pkgs; [ coreutils gnugrep jq socat util-linux ];
+        text = builtins.readFile ./scripts/microvm-stop.sh;
+      };
 
       mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
           apiKeyForwarding = lib.concatStringsSep "\n" (map (var:
-            ''[ -n "''${${var}:-}" ] && echo "${var}=''${${var}}" >> "$AGENT_DIR/.microvm-env"''
+            ''[ -n "''${${var}:-}" ] && echo "${var}=''${${var}}" >> "$INSTANCE_ENV"''
           ) apiKeyVars);
           # Bash fragments for the shadow/enforce wiring, one per endpoint.
           # keyEnv is decided at launch: the var's presence on the host picks
@@ -91,22 +100,102 @@
           contractKeyChecks = lib.concatStringsSep "\n" (map (var: ''
             if [ -n "''${${var}:-}" ]; then _CONTRACT_KEYS="$_CONTRACT_KEYS ${var}"; fi'') apiKeyVars);
           egressGuestEnv = lib.concatMapStringsSep "\n" (ep: ''
-            echo "${ep.baseUrlVar}=http://${egressGuestAddr}${ep.prefix}" >> "$AGENT_DIR/.microvm-env"
+            echo "${ep.baseUrlVar}=http://${egressGuestAddr}${ep.prefix}" >> "$INSTANCE_ENV"
             if [ -n "''${${ep.keyVar}:-}" ]; then
               # Clients insist on a key being present; the proxy strips and
               # replaces whatever travels, so a placeholder satisfies them
               # and the real key never enters the guest.
-              echo "${ep.keyVar}=egress-proxy-placeholder" >> "$AGENT_DIR/.microvm-env"
+              echo "${ep.keyVar}=egress-proxy-placeholder" >> "$INSTANCE_ENV"
             fi'') flavorEndpoints;
-        in pkgs.writeShellScriptBin "microvm-run" ''
+          launcher = pkgs.writeShellScriptBin "microvm-run" ''
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
+        # Derive project basename for host-visible identifiers
+        WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
+        [ -z "$WORK_BASENAME" ] && WORK_BASENAME="root"
+        VM_ID="$WORK_BASENAME-${hostname}"
+
+        # --- Launch scope and slice ---
+        # Every systemd --user unit of a launch shares one stem,
+        # claude_microvm-<id>, and sits in its own slice of that name, nested
+        # in claude_microvm.slice (a dash in a slice name is a level of
+        # nesting, hence the underscore before it):
+        #
+        #   claude_microvm.slice
+        #     claude_microvm-<id>.slice           this launch
+        #       claude_microvm-<id>.scope         the launcher, and QEMU
+        #       claude_microvm-<id>-work.service        virtiofsd for /work
+        #       claude_microvm-<id>-agent-home.service  virtiofsd for agent home
+        #       claude_microvm-<id>-guest.service       virtiofsd for the guest share
+        #       claude_microvm-<id>-egress.service      EGRESS_POLICY=alert|shadow|enforce
+        #
+        # Unit names are global to the user manager, so the slice does not
+        # namespace them: the ID keeps them apart, and each unit's description
+        # says what it is and for which project. `systemctl --user status
+        # claude_microvm-<id>.slice` shows a launch and `systemctl --user stop`
+        # on it stops one. The slice is made on first use and, once empty,
+        # stays until logout — instance.json and its lock, not the slice, say
+        # whether a launch is live.
+        #
+        # The launcher re-runs itself, once, in the scope. QEMU runs as its
+        # child, so the scope holds the VM's processes for as long as any of
+        # them lives, and every daemon is bound to it (BindsTo= + After=): if
+        # the launcher is killed outright, the trap that would stop them never
+        # runs, but systemd stops them as soon as the scope empties — and not
+        # before, since QEMU outliving the launcher means the VM still runs.
+        # systemd-run --scope runs the command in this same process, so the
+        # terminal, the environment and the PID carry over; the ID is passed
+        # along so the units and the instance dir share it.
+        #
+        # The scope can be refused: systemd-run has to move this process into
+        # the user manager's cgroups, which systemd 261 allows from a login
+        # session and even from a system service, but other versions and
+        # setups may not. A probe scope finds out first; without one the
+        # launch goes ahead unbound, and says so. Its daemons still get the
+        # slice.
+        _DESCRIBE=${lib.escapeShellArg "${agentName} microvm"}
+        if [ -z "''${_MICROVM_SCOPE:-}" ]; then
+          # The launch ID: 12 hex digits, 48 random bits — unique enough among
+          # one user's launches (and mkdir refuses a clash rather than sharing
+          # an instance dir), and short enough that its socket paths fit; a
+          # whole UUID pushed them past the limit. The first 12 hex digits of a
+          # v4 UUID are all random.
+          _MICROVM_ID="$(cat /proc/sys/kernel/random/uuid)"
+          _MICROVM_ID="''${_MICROVM_ID//-/}"; _MICROVM_ID="''${_MICROVM_ID:0:12}"
+          if _SCOPE_ERR=$(${pkgs.systemd}/bin/systemd-run --user --scope --quiet --collect -- true 2>&1); then
+            _MICROVM_SCOPE="claude_microvm-$_MICROVM_ID.scope"
+            export _MICROVM_ID _MICROVM_SCOPE
+            exec ${pkgs.systemd}/bin/systemd-run --user --scope --quiet --collect \
+              --unit="$_MICROVM_SCOPE" --slice="claude_microvm-$_MICROVM_ID.slice" \
+              --description="$_DESCRIBE $_MICROVM_ID: the VM, for $WORK" \
+              -- "$0" "$@"
+          fi
+          echo "warning: cannot run this launch in a systemd --user scope: ''${_SCOPE_ERR:-systemd-run failed}" >&2
+          echo "         continuing without one — if the launcher is killed outright, nothing stops its daemons" >&2
+          _MICROVM_SCOPE=""
+        elif ! [[ "''${_MICROVM_ID:-}" =~ ^[0-9a-f]{12}$ ]]; then
+          echo "error: _MICROVM_SCOPE is set but _MICROVM_ID is not a launch ID (12 hex digits); unset both (they are the launcher's own)" >&2
+          exit 1
+        fi
+        ID="$_MICROVM_ID"
+        UNIT_STEM="claude_microvm-$ID"
+        SLICE="$UNIT_STEM.slice"
+        # Every daemon this launch starts: in its slice, tagged so
+        # `journalctl MICROVM_ID=<id>` finds all of their logs, and bound to
+        # the scope when there is one — BindsTo= a unit that does not exist
+        # would stop them starting at all. Each call adds its own
+        # --description, from describe().
+        _UNIT_PROPS=(--slice="$SLICE" -p "LogExtraFields=MICROVM_ID=$ID")
+        if [ -n "$_MICROVM_SCOPE" ]; then
+          _UNIT_PROPS+=(-p "BindsTo=$_MICROVM_SCOPE" -p "After=$_MICROVM_SCOPE")
+        fi
+        describe () { printf -- '--description=%s %s: %s, for %s' "$_DESCRIBE" "$ID" "$1" "$WORK"; }
+
         VM_MEM="''${VM_MEM:-${toString defaultMem}}"
         VM_VCPU="''${VM_VCPU:-${toString defaultVcpu}}"
         CRI_STORAGE_SIZE="''${CRI_STORAGE_SIZE:-${toString defaultCriSize}}"
         ${lib.optionalString storeDiskBacked ''VM_STORE_SIZE="''${VM_STORE_SIZE:-${toString defaultStoreSize}}"''}
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-        ID="$(cat /proc/sys/kernel/random/uuid)"
 
         # --- Egress policy (monitor / alert) ---
         # Passive observation of the guest's traffic via a QEMU filter-dump
@@ -197,16 +286,65 @@
           exit 1
         fi''}
 
-        # Derive project basename for host-visible identifiers
-        WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
-        [ -z "$WORK_BASENAME" ] && WORK_BASENAME="root"
-        VM_ID="$WORK_BASENAME-${hostname}"
+        # --- Instance dir (per launch, in the runtime dir) ---
+        # Everything this launch keeps for itself lives under one directory,
+        # and every path below is derived from it:
+        #
+        #   $XDG_RUNTIME_DIR/claude-microvm/     one root for every flavor
+        #     vms/<id>/                          this launch; 0700, sticky
+        #       guest/                           its own --readonly virtiofsd → /run/microvm
+        #         env  ca-certs/  nix-db.sqlite
+        #       instance.json                    what this is, for tools that list VMs
+        #       lock                             held for the launch's lifetime
+        #       qmp.sock                         QEMU's control socket
+        #       work.sock  agent-home.sock  guest.sock   the three virtiofsd
+        #       egress.port  egress.json         EGRESS_POLICY=shadow|enforce
+        #
+        # The runtime dir rather than beside agent home: it is tmpfs, so the
+        # env file's API keys never reach a disk, and if cleanup never runs (a
+        # SIGKILL, a host crash) what is left goes at logout or reboot rather
+        # than staying on disk; it is local and private to the user, where
+        # agent home may be anywhere; and socket paths there stay well inside
+        # the 107-byte limit. Only guest/ is exported, so the rest never
+        # reaches the guest. The disk images stay beside agent home: they are
+        # gigabytes.
+        if [ ! -d "$RUNTIME" ]; then
+          echo "error: no runtime directory: $RUNTIME does not exist (is XDG_RUNTIME_DIR set, with a user session?)" >&2
+          exit 1
+        fi
+        INSTANCE_ROOT="$RUNTIME/claude-microvm"
+        # Named by the launch ID alone, like every unit of the launch: a tool
+        # with an ID has the path, with nothing to search or match. What the
+        # launch is — project, flavor — is in its instance.json. vms/ leaves
+        # the root free for what is not one VM's.
+        INSTANCE_VMS="$INSTANCE_ROOT/vms"
+        # Set only once this launch has created it, so cleanup removes exactly
+        # what it made and never a directory it did not.
+        INSTANCE_DIR=""
+        _INSTANCE_PATH="$INSTANCE_VMS/$ID"
+        INSTANCE_GUEST="$_INSTANCE_PATH/guest"
+        INSTANCE_ENV="$INSTANCE_GUEST/env"
+        QMP_SOCK="$_INSTANCE_PATH/qmp.sock"
 
-        # --- Work share (virtiofsd) ---
-        SOCK="$RUNTIME/$VM_ID-virtiofs-$ID.sock"
-        UNIT="$VM_ID-virtiofsd-$ID"
-        AGENT_SOCK="$RUNTIME/$VM_ID-virtiofs-$ID-agent-home.sock"
-        AGENT_UNIT="$VM_ID-virtiofsd-$ID-agent-home"
+        SOCK="$_INSTANCE_PATH/work.sock"
+        UNIT="$UNIT_STEM-work"
+        AGENT_SOCK="$_INSTANCE_PATH/agent-home.sock"
+        AGENT_UNIT="$UNIT_STEM-agent-home"
+        GUEST_SOCK="$_INSTANCE_PATH/guest.sock"
+        GUEST_UNIT="$UNIT_STEM-guest"
+        # sun_path is 108 bytes, NUL included. The longest default is
+        # /run/user/<uid>/claude-microvm/vms/<id>/agent-home.sock, 62 bytes for
+        # a 4-digit uid, leaving room for longer uids and runtime dirs;
+        # tests/instance-share.nix checks a 7-digit uid's. A
+        # runtime dir long enough to break it would otherwise surface as QEMU
+        # or virtiofsd failing to bind, after the daemons before it had started.
+        for _s in "$QMP_SOCK" "$SOCK" "$AGENT_SOCK" "$GUEST_SOCK"; do
+          if [ "''${#_s}" -gt 107 ]; then
+            echo "error: socket path too long (''${#_s} bytes, the limit is 107): $_s" >&2
+            echo "       it is under XDG_RUNTIME_DIR=$RUNTIME; a shorter one avoids this" >&2
+            exit 1
+          fi
+        done
         AGENT_TEMP=""
         STORE_IMG=""
         STORE_STATE_DIR=""
@@ -216,11 +354,12 @@
         # exporting a host directory with nothing to stop it. Everything it
         # touches is initialised above for that reason.
         # virtiofsd removes neither its socket nor its `<socket>.pid` when
-        # stopped with SIGTERM, which is what `systemctl stop` sends — so both
-        # are removed here, or every launch leaves them in $RUNTIME.
+        # stopped with SIGTERM, which is what `systemctl stop` sends; both are
+        # in the instance dir, which goes last, after every daemon has stopped.
         cleanup() {
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
+          ${pkgs.systemd}/bin/systemctl --user stop "$GUEST_UNIT" 2>/dev/null || true
           if [ -n "$EGRESS_UNIT" ]; then
             ${pkgs.systemd}/bin/systemctl --user stop "$EGRESS_UNIT" 2>/dev/null || true
           fi
@@ -229,12 +368,6 @@
           if [ -n "$EGRESS_PCAP" ] && [ -z "''${EGRESS_KEEP_PCAP:-}" ]; then
             rm -f "$EGRESS_PCAP"
           fi
-          if [ -n "$_EGRESS_PORTFILE" ]; then
-            rm -f "$_EGRESS_PORTFILE" "$_EGRESS_PROXY_CFG"
-          fi
-          for _s in "$SOCK" "$AGENT_SOCK"; do
-            rm -f "$_s" "$_s.pid"
-          done
           if [ -n "$STORE_IMG" ]; then
             rm -f "$STORE_IMG"
             # Leave nothing behind on the host: the dir is ours and the image is
@@ -244,17 +377,51 @@
           if [ -n "$AGENT_TEMP" ]; then
             rm -rf "$AGENT_TEMP"
           fi
+          # This launch's instance dir goes with it: guest/ — env (API keys
+          # included), CA certs, DB snapshot — and its sockets, lock and egress
+          # files. Its finished files are read-only (see the guest share), so
+          # they are made writable first. vms/ and the root stay, empty, until
+          # logout: they are shared by concurrent launches, and removing them
+          # here would race one that has just made sure they exist and is
+          # about to create its own dir in them.
+          if [ -n "$INSTANCE_DIR" ]; then
+            chmod -R u+w "$INSTANCE_DIR" 2>/dev/null || true
+            rm -rf "$INSTANCE_DIR"
+          fi
         }
         trap cleanup EXIT
+        # bash runs the EXIT trap on SIGTERM and SIGHUP too, which is what
+        # `systemctl --user stop <scope>` and closing the terminal send.
+        # Nothing runs it on SIGKILL; for that, the daemons are bound to the
+        # launch scope (see "Launch scope").
+
+        # Created before the first daemon, whose socket lives in it. The root
+        # and vms/ may already exist (another launch); this launch's dir must
+        # not, and mkdir without -p refuses if it does. Sticky, as the XDG spec
+        # asks of runtime files that must survive its periodic clean-up of
+        # anything untouched for six hours — a VM can run for days.
+        mkdir -p "$INSTANCE_VMS"
+        chmod 700 "$INSTANCE_ROOT" "$INSTANCE_VMS"
+        mkdir -m 1700 "$_INSTANCE_PATH"
+        INSTANCE_DIR="$_INSTANCE_PATH"
+        mkdir -m 1700 "$INSTANCE_GUEST"
+        # Held until this launch — QEMU included, which inherits the descriptor
+        # — has gone, so a dir whose lock can be taken is one nobody is using.
+        # Read-only once open: the descriptor keeps working, and the tools
+        # that check it open it read-only.
+        exec {_INSTANCE_LOCK_FD}>"$INSTANCE_DIR/lock"
+        chmod 1400 "$INSTANCE_DIR/lock"
+        ${pkgs.util-linux}/bin/flock -n "$_INSTANCE_LOCK_FD"
 
         # Every launch starts its own daemons: the unit and socket names carry
-        # this launch's random $ID, so there is never one to reuse, and the
-        # cleanup trap stops them on exit.
+        # this launch's random $ID, so there is never one to reuse. The cleanup
+        # trap stops them on exit, and systemd does if the launch scope empties
+        # without it (see "Launch scope" above).
         #
         # virtiofsd runs unprivileged in a user namespace (--sandbox=namespace).
         # --uid-map / --gid-map: map host user to namespace root (single-entry, no /etc/subuid needed)
         # --translate-uid / --translate-gid: map guest uid/gid 1000 to namespace uid/gid 0 (= host user)
-        ${pkgs.systemd}/bin/systemd-run --user --unit="$UNIT" --collect \
+        ${pkgs.systemd}/bin/systemd-run --user --unit="$UNIT" --collect "''${_UNIT_PROPS[@]}" "$(describe "virtiofsd for /work")" \
           -- ${virtiofsd}/bin/virtiofsd \
             --socket-path="$SOCK" \
             --shared-dir="$WORK" \
@@ -284,6 +451,45 @@
         if [ ! -d "$AGENT_DIR" ]; then
           mkdir -p "$AGENT_DIR"
         fi
+
+        # What this instance is, for anything that lists running VMs: read
+        # this rather than parsing the directory name. `units` are the
+        # systemd --user units this launch starts; the egress one exists only
+        # for the policies that run something on the host (the alert follower,
+        # the shadow/enforce proxy), and is null otherwise.
+        _EGRESS_UNIT_NAME=""
+        case "$EGRESS_POLICY" in alert|shadow|enforce) _EGRESS_UNIT_NAME="$UNIT_STEM-egress" ;; esac
+        ${pkgs.jq}/bin/jq -n \
+          --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
+          --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg guest "$INSTANCE_GUEST" \
+          --arg egressPolicy "$EGRESS_POLICY" \
+          --arg qmp "$QMP_SOCK" --arg workSock "$SOCK" --arg agentHomeSock "$AGENT_SOCK" --arg guestSock "$GUEST_SOCK" \
+          --arg scopeUnit "$_MICROVM_SCOPE" --arg slice "$SLICE" \
+          --arg workUnit "$UNIT" --arg agentHomeUnit "$AGENT_UNIT" --arg guestUnit "$GUEST_UNIT" --arg egressUnit "$_EGRESS_UNIT_NAME" \
+          '{version: 1, pid: $pid, flavor: $flavor, vmId: $vmId, id: $id, started: $started,
+            work: $work, agentHome: $agentHome, guest: $guest, guestMount: "/run/microvm",
+            egressPolicy: $egressPolicy,
+            sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
+            slice: $slice,
+            units: {scope: (if $scopeUnit == "" then null else $scopeUnit end), work: $workUnit, agentHome: $agentHomeUnit, guest: $guestUnit,
+                    egress: (if $egressUnit == "" then null else $egressUnit end)}}' \
+          > "$INSTANCE_DIR/instance.json.new"
+        # Read-only, against accidental edits, and put in place whole, so a
+        # tool never reads half of it. It describes the launch; the tools here
+        # take nothing from it that the layout already says (the QMP socket is
+        # always qmp.sock), and refuse one whose id is not its dir's name.
+        chmod 1400 "$INSTANCE_DIR/instance.json.new"
+        mv "$INSTANCE_DIR/instance.json.new" "$INSTANCE_DIR/instance.json"
+
+        # What this launch hands the guest — the env file, EXTRA_CA_CERTS, the
+        # nix DB snapshot — goes to the instance dir's guest/, not agent home.
+        # Agent home is shared by every launch on the project and writable from
+        # the guest, so files there were overwritten by the next launch and
+        # could be rewritten by any of them, while root services in the guest
+        # act on all three. Earlier launchers left them here, the env file with
+        # API keys in it; nothing reads them here any more.
+        rm -rf "$AGENT_DIR/.microvm-env" "$AGENT_DIR/.microvm-ca-certs" "$AGENT_DIR/.microvm-nix-db.sqlite"
 
         # --- Egress setup (EGRESS_POLICY != open) ---
         if [ "$EGRESS_POLICY" != "open" ]; then
@@ -365,8 +571,8 @@
             EGRESS_AUDIT="$EGRESS_DIR/session-$_EGRESS_STAMP.audit.jsonl"
             : > "$EGRESS_AUDIT"
             ln -sfn "$(basename "$EGRESS_AUDIT")" "$EGRESS_DIR/latest.audit.jsonl"
-            _EGRESS_PORTFILE="$RUNTIME/$VM_ID-egress-$ID.port"
-            _EGRESS_PROXY_CFG="$RUNTIME/$VM_ID-egress-$ID.json"
+            _EGRESS_PORTFILE="$INSTANCE_DIR/egress.port"
+            _EGRESS_PROXY_CFG="$INSTANCE_DIR/egress.json"
             _EGRESS_PROXY_MODE="enforce"
             [ "$EGRESS_POLICY" = "shadow" ] && _EGRESS_PROXY_MODE="log"
             # tests/egress-config.nix extracts the region between these
@@ -381,10 +587,10 @@
 EOF
             chmod 600 "$_EGRESS_PROXY_CFG"
             # END egress-proxy-config
-            EGRESS_UNIT="$VM_ID-egress-$ID"
+            EGRESS_UNIT="$_EGRESS_UNIT_NAME"
             _EGRESS_SETENV=()
             ${egressProxySetenv}
-            ${pkgs.systemd}/bin/systemd-run --user --unit="$EGRESS_UNIT" --collect \
+            ${pkgs.systemd}/bin/systemd-run --user --unit="$EGRESS_UNIT" --collect "''${_UNIT_PROPS[@]}" "$(describe "egress proxy, EGRESS_POLICY=$EGRESS_POLICY")" \
               ''${_EGRESS_SETENV[@]+"''${_EGRESS_SETENV[@]}"} \
               -- ${egressProxy}/bin/egress-proxy -config "$_EGRESS_PROXY_CFG"
             for i in $(seq 1 50); do
@@ -512,7 +718,7 @@ EOF
         rm -f "$STORE_IMG"
         ''}
 
-        ${pkgs.systemd}/bin/systemd-run --user --unit="$AGENT_UNIT" --collect \
+        ${pkgs.systemd}/bin/systemd-run --user --unit="$AGENT_UNIT" --collect "''${_UNIT_PROPS[@]}" "$(describe "virtiofsd for agent home")" \
           -- ${virtiofsd}/bin/virtiofsd \
             --socket-path="$AGENT_SOCK" \
             --shared-dir="$AGENT_DIR" \
@@ -530,23 +736,23 @@ EOF
         done
         [ -S "$AGENT_SOCK" ] || { echo "error: agent-home virtiofsd socket did not appear"; exit 1; }
 
-        # Write host env vars for the VM
-        echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$AGENT_DIR/.microvm-env"
-        # The file carries API keys and whatever EXTRA_ENV forwards, and it
-        # lives in the agent data dir on the host — keep it owner-only.
-        chmod 600 "$AGENT_DIR/.microvm-env"
-        echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$AGENT_DIR/.microvm-env"
+        # Write host env vars for the VM, into this launch's instance dir
+        echo "DIRENV_ALLOW=''${DIRENV_ALLOW:-0}" > "$INSTANCE_ENV"
+        # The file carries API keys and whatever EXTRA_ENV forwards — keep it
+        # owner-only. In the guest it shows as the agent's, still 0600.
+        chmod 600 "$INSTANCE_ENV"
+        echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$INSTANCE_ENV"
         # %q produces a single-quoted/escaped form that survives `source`
         # so values like AGENTS_ARGS='-p "hi there"' round-trip intact.
-        printf 'AGENTS_ARGS=%q\n' "''${AGENTS_ARGS:-}" >> "$AGENT_DIR/.microvm-env"
+        printf 'AGENTS_ARGS=%q\n' "''${AGENTS_ARGS:-}" >> "$INSTANCE_ENV"
         # The guest reads the policy for the seal service and the ssh wrapper
         # (modules/egress.nix); it is informational in the open modes.
-        echo "EGRESS_POLICY=$EGRESS_POLICY" >> "$AGENT_DIR/.microvm-env"
+        echo "EGRESS_POLICY=$EGRESS_POLICY" >> "$INSTANCE_ENV"
         # Read by modules/workspace.nix: read-only binds over workspace paths
         # whose contents execute on the host later, and the ephemeral /work
         # overlay.
-        echo "WORKSPACE_GUARD=''${WORKSPACE_GUARD:-}" >> "$AGENT_DIR/.microvm-env"
-        echo "WORKSPACE_MODE=$WORKSPACE_MODE" >> "$AGENT_DIR/.microvm-env"
+        echo "WORKSPACE_GUARD=''${WORKSPACE_GUARD:-}" >> "$INSTANCE_ENV"
+        echo "WORKSPACE_MODE=$WORKSPACE_MODE" >> "$INSTANCE_ENV"
         case "$EGRESS_POLICY" in
           shadow|enforce)
             # The key never enters the guest: the agent talks plaintext HTTP
@@ -554,17 +760,17 @@ EOF
             # host), and the proxy originates genuine TLS upstream. NO_PROXY
             # keeps the BASE_URL requests origin-form instead of routing
             # them through the CONNECT handler.
-            echo "EGRESS_PROXY_ADDR=${egressGuestAddr}" >> "$AGENT_DIR/.microvm-env"
+            echo "EGRESS_PROXY_ADDR=${egressGuestAddr}" >> "$INSTANCE_ENV"
             # Negative control for the guest's seal self-test (microvm-policy
             # v0.3.0+): slirp maps 10.0.2.2 to the host's loopback, so without
             # restrict=on this reaches the proxy's host listener. Sealed, it
             # must be refused; with no probe the self-test fails inconclusive.
-            echo "EGRESS_SEAL_PROBE=10.0.2.2:$_EGRESS_PORT" >> "$AGENT_DIR/.microvm-env"
+            echo "EGRESS_SEAL_PROBE=10.0.2.2:$_EGRESS_PORT" >> "$INSTANCE_ENV"
             for _v in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
-              echo "$_v=http://${egressGuestAddr}" >> "$AGENT_DIR/.microvm-env"
+              echo "$_v=http://${egressGuestAddr}" >> "$INSTANCE_ENV"
             done
-            echo "NO_PROXY=${lib.head (lib.splitString ":" egressGuestAddr)},localhost,127.0.0.1" >> "$AGENT_DIR/.microvm-env"
-            echo "no_proxy=${lib.head (lib.splitString ":" egressGuestAddr)},localhost,127.0.0.1" >> "$AGENT_DIR/.microvm-env"
+            echo "NO_PROXY=${lib.head (lib.splitString ":" egressGuestAddr)},localhost,127.0.0.1" >> "$INSTANCE_ENV"
+            echo "no_proxy=${lib.head (lib.splitString ":" egressGuestAddr)},localhost,127.0.0.1" >> "$INSTANCE_ENV"
             ${egressGuestEnv}
             ;;
           *)
@@ -607,15 +813,14 @@ EOF
             fi
             # %q again: the guest sources this file, so an unescaped value
             # would be executable code, not data.
-            printf '%s=%q\n' "$_name" "$_value" >> "$AGENT_DIR/.microvm-env"
+            printf '%s=%q\n' "$_name" "$_value" >> "$INSTANCE_ENV"
             _CONTRACT_EXTRA="$_CONTRACT_EXTRA $_name"
           done
         fi
 
-        # Copy custom CA certificates into agent home for the VM
+        # Copy custom CA certificates into the instance dir for the VM
         if [ -n "''${EXTRA_CA_CERTS:-}" ]; then
-          _CA_DIR="$AGENT_DIR/.microvm-ca-certs"
-          rm -rf "$_CA_DIR"
+          _CA_DIR="$INSTANCE_GUEST/ca-certs"
           mkdir -p "$_CA_DIR"
           if [ -f "$EXTRA_CA_CERTS" ]; then
             cp "$EXTRA_CA_CERTS" "$_CA_DIR/"
@@ -733,11 +938,40 @@ EOF
             ".timeout 30000" \
             "BEGIN;" \
             "SELECT count(*) FROM sqlite_master;" \
-            ".backup '$AGENT_DIR/.microvm-nix-db.sqlite'" \
+            ".backup '$INSTANCE_GUEST/nix-db.sqlite'" \
             "COMMIT;" \
             > /dev/null \
-            || rm -f "$AGENT_DIR/.microvm-nix-db.sqlite"
+            || rm -f "$INSTANCE_GUEST/nix-db.sqlite"
         fi
+
+        # --- Guest share (virtiofsd, read-only) ---
+        # Exports guest/ only, never the instance dir around it. Started last,
+        # once everything above has written its file: from here on guest/ is
+        # only read, so it is made read-only and owner-only now — files 0400,
+        # dirs 0500 — against accidental edits or removal on the host, and
+        # sticky (see the instance dir's creation). --readonly is the guarantee
+        # against the guest — virtiofsd refuses every write, so root in the
+        # guest cannot change these files whatever it remounts; the modes do
+        # not add to it. --translate-uid shows them as the agent's, so the
+        # 0400 env file stays readable by the agent and by no one else.
+        chmod -R a-w,go-rwx,+t "$INSTANCE_GUEST"
+        ${pkgs.systemd}/bin/systemd-run --user --unit="$GUEST_UNIT" --collect "''${_UNIT_PROPS[@]}" "$(describe "virtiofsd for the read-only guest share")" \
+          -- ${virtiofsd}/bin/virtiofsd \
+            --socket-path="$GUEST_SOCK" \
+            --shared-dir="$INSTANCE_GUEST" \
+            --readonly \
+            --sandbox=namespace \
+            --uid-map ":0:$(id -u):1:" \
+            --gid-map ":0:$(id -g):1:" \
+            --translate-uid "map:1000:0:1" \
+            --translate-gid "map:1000:0:1" \
+            --socket-group="$(id -gn)"
+
+        for i in $(seq 1 50); do
+          [ -S "$GUEST_SOCK" ] && break
+          sleep 0.1
+        done
+        [ -S "$GUEST_SOCK" ] || { echo "error: guest-share virtiofsd socket did not appear"; exit 1; }
 
         # $CRI_IMG is used as sed replacement text below. Escape characters
         # that are special on the replacement side (\, &) and the | delimiter
@@ -755,6 +989,12 @@ EOF
           -e "s|${hostname}-virtiofs-work.sock|$SOCK|g"
           -e "s|/tmp/${hostname}-home|$AGENT_DIR|g"
           -e "s|${hostname}-virtiofs-agent-home.sock|$AGENT_SOCK|g"
+          -e "s|/tmp/${hostname}-instance|$INSTANCE_GUEST|g"
+          -e "s|${hostname}-virtiofs-instance.sock|$GUEST_SOCK|g"
+          # QEMU's QMP socket: microvm.socket is a relative "<hostname>.sock",
+          # which would land in whatever directory the launcher runs from, and
+          # two launches from one directory would take it from each other.
+          -e "s|-qmp unix:${hostname}.sock,|-qmp unix:$QMP_SOCK,|g"
           # CRI storage volume image: microvm.nix emits the relative path
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.
@@ -820,8 +1060,8 @@ EOF
               -e "s|-netdev 'user,id=usernet'|-netdev 'user,id=usernet' -object 'filter-dump,id=egress-dump,netdev=usernet,file=$_EGRESS_PCAP_ESC,maxlen=''${EGRESS_PCAP_MAXLEN:-4096}'|"
             )
             if [ "$EGRESS_POLICY" = "alert" ]; then
-              EGRESS_UNIT="$VM_ID-egress-$ID"
-              ${pkgs.systemd}/bin/systemd-run --user --unit="$EGRESS_UNIT" --collect \
+              EGRESS_UNIT="$_EGRESS_UNIT_NAME"
+              ${pkgs.systemd}/bin/systemd-run --user --unit="$EGRESS_UNIT" --collect "''${_UNIT_PROPS[@]}" "$(describe "egress alert follower")" \
                 -- ${egressReport}/bin/egress-report follow "$EGRESS_PCAP" \
                    --allowlist "$_EGRESS_ALLOWLIST_FILE" --alerts "$EGRESS_ALERTS"
             fi
@@ -867,6 +1107,13 @@ EOF
         fi
         _row "agent home" "" "$(_tilde "$AGENT_DIR") → /home/agent"
         _cont "persists across sessions"
+        # The third share, and the one API keys arrive by: what this launch
+        # hands the guest (see "Instance dir"). Listed as it actually is.
+        _GUEST_HOLDS="env"
+        if [ -d "$INSTANCE_GUEST/ca-certs" ]; then _GUEST_HOLDS="$_GUEST_HOLDS, CA certs"; fi
+        if [ -f "$INSTANCE_GUEST/nix-db.sqlite" ]; then _GUEST_HOLDS="$_GUEST_HOLDS, nix DB snapshot"; fi
+        _row "guest share" ok "this launch only → /run/microvm, read-only to the guest"
+        _cont "$_GUEST_HOLDS; removed when the launch ends"
         if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
           _row "dev shell" bad "loaded from the project — its Nix code is evaluated on the HOST"
         else
@@ -930,6 +1177,21 @@ EOF
           _row containers "" "off"
         fi
         _row resources "" "''${VM_MEM} MiB RAM · $VM_VCPU vCPUs${lib.optionalString storeDiskBacked " · writable store \${VM_STORE_SIZE} MiB, fresh each boot"}"
+        # The handle on this launch from outside the VM: its units, its slice,
+        # its journal tag and its instance dir all carry the ID.
+        _row launch "" "$ID · $INSTANCE_DIR/"
+        # microvm-stop presses the VM's power button over QMP, so the guest
+        # shuts down cleanly and this launcher cleans up — with or without a
+        # scope. Stopping the slice is no substitute: it kills QEMU outright,
+        # and without a scope it would stop only the daemons, leaving the VM
+        # running on shares that have gone. Named as this launcher was run,
+        # since it ships beside it (./result/bin/microvm-stop after `make`).
+        case "$0" in
+          */*) _STOP_CMD="$(dirname -- "$0")/microvm-stop" ;;
+          *) _STOP_CMD=microvm-stop ;;
+        esac
+        [ -x "$_STOP_CMD" ] || _STOP_CMD=microvm-stop
+        _hint "stop: $_STOP_CMD $ID"
         echo "$_C_D────────────────────────────────────────────────────────────────────────────────$_C_0"
         # The contract is the last thing before the kernel's boot log scrolls
         # it away, so pause on it — but only with a terminal to read it and a
@@ -991,6 +1253,13 @@ EOF
         esac
         exit "$_VM_RC"
       '';
+        # microvm-stop beside microvm-run, so a launch can name it in its
+        # contract and result/bin/ has both.
+        in pkgs.symlinkJoin {
+          name = "microvm-run";
+          paths = [ launcher (mkMicrovmStop pkgs) ];
+          meta.mainProgram = "microvm-run";
+        };
     in
     {
       nixosConfigurations = builtins.listToAttrs (lib.flatten (map (system:
@@ -1002,8 +1271,13 @@ EOF
               microvm.nixosModules.microvm
               ./modules/base.nix
               ./modules/cri.nix
-              # microvmPolicy.* defaults match this repo's layout.
               microvm-policy.nixosModules.default
+              # Its other defaults match this repo's layout; its state file is
+              # the launcher's env file, on the read-only instance share.
+              ({ config, ... }: {
+                microvmPolicy.stateFile = "${config.claude-vm.instance.dir}/env";
+                microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
+              })
               { claude-vm.cri.enable = true; }
               flavor.agentModule
             ];
@@ -1058,6 +1332,9 @@ EOF
           # Re-exported from microvm-policy so `nix run .#egress-report`
           # keeps working against this flake.
           inherit (policyPkgs) egress-report egress-proxy;
+          # Also in every flavor's package, beside microvm-run; on its own for
+          # whatever drives launches from outside (`nix run .#microvm-stop`).
+          microvm-stop = mkMicrovmStop pkgs;
         } //
         builtins.mapAttrs (name: flavor: let
           nixosCfg = self.nixosConfigurations."${name}${flavor.suffix}-${system}".config;
@@ -1095,6 +1372,23 @@ EOF
         };
         share-recovery = import ./tests/share-recovery.nix {
           inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
+        env-file-data-only = import ./tests/env-file-data-only.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
+        microvm-stop = import ./tests/microvm-stop.nix {
+          inherit pkgs lib;
+          microvmStop = self.packages.${system}.microvm-stop;
+        };
+        launch-scope = import ./tests/launch-scope.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
+        instance-share = import ./tests/instance-share.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
           config = self.nixosConfigurations."claude-${system}".config;
         };
         seed-idempotence = import ./tests/seed-idempotence.nix {
