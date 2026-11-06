@@ -12,7 +12,10 @@
 #              started, boot/ and exit/ (the guest share then and at exit),
 #              exported, instance-mode, modes, instance-ls, instance.json,
 #              lock. QEMU_RC sets the VM's exit status; HOLD=<file> keeps it
-#              running until that file appears.
+#              running until that file appears, or until it is powered off
+#              over QMP when QMP=1 has it answer QMP (commands in qmp,
+#              powered-off once off; QMP_IGNORE_POWERDOWN=1 ignores the
+#              power button).
 { pkgs, runner }:
 
 rec {
@@ -81,12 +84,33 @@ rec {
   cp "$inst/instance.json" "$LOG/instance.json"
   # A new open of the lock file is a new lock: it must find this launch's held.
   if ${pkgs.util-linux}/bin/flock -n "$inst/lock" true; then echo free; else echo held; fi > "$LOG/lock"
+  # QMP=1: answer QMP where the launcher told QEMU to, and "power off" on the
+  # power button or quit — the button is ignored with QMP_IGNORE_POWERDOWN=1,
+  # as by a guest that does not react to it. Each command goes to $LOG/qmp.
+  if [ -n "''${QMP:-}" ]; then
+    qmp=$(grep -o -- '-qmp unix:[^,]*' "$LOG/qemu.sh" | head -1); qmp="''${qmp#-qmp unix:}"
+    ${pkgs.socat}/bin/socat UNIX-LISTEN:"$qmp",fork EXEC:"$STUBS/qmp" &
+    listener=$!
+  fi
   touch "$LOG/started"
   if [ -n "''${HOLD:-}" ]; then
-    for _ in $(seq 1 300); do [ -e "$HOLD" ] && break; sleep 0.1; done
+    for _ in $(seq 1 300); do [ -e "$HOLD" ] || [ -e "$LOG/powered-off" ] && break; sleep 0.1; done
   fi
+  [ -n "''${listener:-}" ] && kill "$listener" 2>/dev/null
   cp -a "$dir" "$LOG/exit"
   exit "''${QEMU_RC:-0}"
+  EOF
+  cat > $STUBS/qmp <<'EOF'
+  #!${pkgs.bash}/bin/bash
+  echo '{"QMP": {"version": {}, "capabilities": []}}'
+  while IFS= read -r line; do
+    echo "$line" >> "$LOG/qmp"
+    echo '{"return": {}}'
+    case "$line" in
+      *system_powerdown*) [ -n "''${QMP_IGNORE_POWERDOWN:-}" ] || touch "$LOG/powered-off" ;;
+      *'"quit"'*) touch "$LOG/powered-off" ;;
+    esac
+  done
   EOF
   chmod +x $STUBS/*
 

@@ -201,6 +201,20 @@
 
         VM_MEM="''${VM_MEM:-${toString defaultMem}}"
         VM_VCPU="''${VM_VCPU:-${toString defaultVcpu}}"
+        # A wall-clock limit on the VM: when it is up, the power button, and
+        # QEMU's quit if the guest has not gone VM_TIMEOUT_GRACE later — see
+        # "Wall-clock limit" below. Seconds, or with an s/m/h suffix; 0 is none.
+        VM_TIMEOUT="''${VM_TIMEOUT:-0}"
+        VM_TIMEOUT_GRACE="''${VM_TIMEOUT_GRACE:-60}"
+        _seconds () { case "$1" in *h) echo $(( 10#''${1%h} * 3600 )) ;; *m) echo $(( 10#''${1%m} * 60 )) ;; *s) echo $(( 10#''${1%s} )) ;; *) echo $(( 10#$1 )) ;; esac; }
+        for _v in VM_TIMEOUT VM_TIMEOUT_GRACE; do
+          if ! [[ "''${!_v}" =~ ^[0-9]+[smh]?$ ]]; then
+            echo "error: $_v must be seconds, or a number with s, m or h (got '$(printf '%s' "''${!_v}")')" >&2
+            exit 1
+          fi
+        done
+        _TIMEOUT_S="$(_seconds "$VM_TIMEOUT")"
+        _GRACE_S="$(_seconds "$VM_TIMEOUT_GRACE")"
         CRI_STORAGE_SIZE="''${CRI_STORAGE_SIZE:-${toString defaultCriSize}}"
         ${lib.optionalString storeDiskBacked ''VM_STORE_SIZE="''${VM_STORE_SIZE:-${toString defaultStoreSize}}"''}
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -636,6 +650,7 @@
         done
         ${pkgs.jq}/bin/jq -n \
           --argjson shares "$_SHARES_JSON" \
+          --argjson timeout "$_TIMEOUT_S" --argjson timeoutGrace "$_GRACE_S" \
           --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
           --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" --arg guest "$INSTANCE_GUEST" \
@@ -647,6 +662,7 @@
             work: $work, agentHome: $agentHome, agentHomeMode: $agentHomeMode, guest: $guest, guestMount: "/run/microvm",
             egressPolicy: $egressPolicy,
             shares: $shares,
+            timeout: (if $timeout == 0 then null else {seconds: $timeout, graceSeconds: $timeoutGrace} end),
             sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
             slice: $slice,
             units: {scope: (if $scopeUnit == "" then null else $scopeUnit end), work: $workUnit, agentHome: $agentHomeUnit, guest: $guestUnit,
@@ -1413,6 +1429,9 @@ EOF
           _row containers "" "off"
         fi
         _row resources "" "''${VM_MEM} MiB RAM · $VM_VCPU vCPUs${lib.optionalString storeDiskBacked " · writable store \${VM_STORE_SIZE} MiB, fresh each boot"}"
+        if [ "$_TIMEOUT_S" -gt 0 ]; then
+          _cont "wall-clock limit $VM_TIMEOUT: then the power button, and quit $VM_TIMEOUT_GRACE later"
+        fi
         # The handle on this launch from outside the VM: its units, its slice,
         # its journal tag and its instance dir all carry the ID.
         _row launch "" "$ID · $INSTANCE_DIR/"
@@ -1437,9 +1456,51 @@ EOF
           read -r -p "press Enter to boot (NO_PAUSE=1 to skip this) … " _ || true
         fi
 
+        # --- Wall-clock limit (VM_TIMEOUT) ---
+        # A watcher started with the VM, not a timer the launcher sleeps on: it
+        # holds the limit even if the launcher itself is killed outright, as
+        # long as QEMU runs. It stops as microvm-stop does — the power button,
+        # then quit after the grace — and leaves timed-out in the instance dir
+        # for the exit status. It closes its copies of the launch's locks, so
+        # they say when the VM has gone, and it then ends at once: it never
+        # keeps the scope, and with it the daemons, alive.
+        _TIMEOUT_PID=""
+        if [ "$_TIMEOUT_S" -gt 0 ]; then
+          (
+            trap - EXIT
+            exec {_INSTANCE_LOCK_FD}>&-
+            if [ -n "''${_EPHEMERAL_LOCK_FD:-}" ]; then exec {_EPHEMERAL_LOCK_FD}<&-; fi
+            _started=$SECONDS
+            while :; do
+              [ -e "$INSTANCE_DIR/lock" ] || exit 0
+              if ${pkgs.util-linux}/bin/flock -n "$INSTANCE_DIR/lock" true 2>/dev/null; then exit 0; fi
+              if [ $(( SECONDS - _started )) -ge "$_TIMEOUT_S" ]; then
+                : > "$INSTANCE_DIR/timed-out"
+                echo "VM_TIMEOUT: $VM_TIMEOUT is up — pressing the VM's power button" >&2
+                if ! ${mkMicrovmStop pkgs}/bin/microvm-stop --timeout "$_GRACE_S" "$INSTANCE_DIR" >/dev/null 2>&1; then
+                  echo "VM_TIMEOUT: still running $VM_TIMEOUT_GRACE later — stopping QEMU" >&2
+                  ${mkMicrovmStop pkgs}/bin/microvm-stop --force --timeout 30 "$INSTANCE_DIR" >/dev/null 2>&1 || true
+                fi
+                exit 0
+              fi
+              sleep 1
+            done
+          ) </dev/null &
+          _TIMEOUT_PID=$!
+        fi
+
         # Run QEMU with corrected paths
         _VM_RC=0
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run) || _VM_RC=$?
+        if [ -n "$_TIMEOUT_PID" ]; then
+          kill "$_TIMEOUT_PID" 2>/dev/null || true
+          # 124, as timeout(1) exits, so a caller can tell a run cut short
+          # from one that ended on its own.
+          if [ -e "$INSTANCE_DIR/timed-out" ]; then
+            echo "VM_TIMEOUT: the VM was stopped after $VM_TIMEOUT" >&2
+            _VM_RC=124
+          fi
+        fi
 
         case "$EGRESS_POLICY" in
           monitor|alert)
@@ -1646,6 +1707,10 @@ EOF
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        vm-timeout = import ./tests/vm-timeout.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
         extra-shares = import ./tests/extra-shares.nix {
           inherit pkgs lib;
           inherit (self.lib) mkRunner mkNixosConfig;

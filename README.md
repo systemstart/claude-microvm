@@ -495,6 +495,25 @@ until the launch has gone (60 s by default, `--timeout` to change), and
 says so if the guest ignores the button — `--force` is for that case. It works
 the same for every launch, with a [launch scope](#launch-scope) or without.
 
+### Wall-clock limit
+
+`VM_TIMEOUT` stops the VM after a fixed time, for runs nobody watches:
+
+```sh
+VM_TIMEOUT=3h make claude.run           # seconds, or with s, m or h
+VM_TIMEOUT=3h VM_TIMEOUT_GRACE=2m …     # how long the guest gets to shut down (default 60s)
+```
+
+When the time is up the launcher presses the VM's power button, as
+`microvm-stop` does, so the guest shuts down cleanly; a guest still running
+`VM_TIMEOUT_GRACE` later is stopped with QEMU's `quit`. The launch then exits
+**124**, as `timeout(1)` does, so a caller can tell a run that was cut short
+from one that ended on its own. The limit counts from the VM's start, not the
+launcher's, and holds even if the launcher itself is killed outright: the
+watcher keeps going as long as QEMU runs, and ends as soon as it does. The
+session contract shows the limit, and `instance.json` carries it as
+`timeout: {seconds, graceSeconds}` (`null` without one).
+
 ### Launch scope
 
 Each launch's systemd user units share one name, `claude_microvm-<id>`, and a
@@ -889,6 +908,8 @@ Rebuild with `make claude`.
 | `AGENT_SETTINGS` | Host path to a settings file seeded into the agent home before boot (flavor-specific destination, e.g. `.claude/settings.json`) — see [Pre-seeding agent settings](#pre-seeding-agent-settings) | (none) |
 | `VM_MEM` | VM memory in MB | `8192` |
 | `VM_VCPU` | VM vCPU count | `4` |
+| `VM_TIMEOUT` | Wall-clock limit on the VM, in seconds or with an `s`/`m`/`h` suffix: then the power button, `quit` after `VM_TIMEOUT_GRACE`, and exit status 124 — see [Wall-clock limit](#wall-clock-limit) | `0` (none) |
+| `VM_TIMEOUT_GRACE` | How long the guest gets to shut down once `VM_TIMEOUT` is up, before QEMU is stopped | `60` |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `DIRENV_REEVAL` | Set to `1` to re-evaluate changed project Nix files on the host without the interactive prompt (see [Hardening notes](#hardening-notes)) | (prompt) |
 | `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.mcp.json`, `.claude/commands`, …) read-only inside the guest | (off) |
