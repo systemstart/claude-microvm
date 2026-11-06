@@ -89,6 +89,10 @@
           # Bash fragments for the shadow/enforce wiring, one per endpoint.
           # keyEnv is decided at launch: the var's presence on the host picks
           # between injection and OAuth passthrough.
+          # "<host> <path>,<path>" per endpoint, ";"-joined, for the contract's
+          # note on a deny that covers one (scripts/egress-rules.awk).
+          egressEndpointHosts = lib.concatMapStringsSep ";" (ep:
+            "${lib.head (lib.splitString "/" (lib.removePrefix "https://" ep.upstream))} ${lib.concatStringsSep "," ep.allowedPaths}") flavorEndpoints;
           egressEndpointJson = lib.concatMapStringsSep "\n" (ep: ''
             _EGRESS_EP_KEYENV=""
             if [ -n "''${${ep.keyVar}:-}" ]; then _EGRESS_EP_KEYENV="${ep.keyVar}"; fi
@@ -649,7 +653,7 @@
               fi
             } > "$_EGRESS_RULES.src"
             ${pkgs.gawk}/bin/awk -f ${./scripts/egress-rules.awk} \
-              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" -v builtin="$EGRESS_BUILTIN" \
+              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" -v builtin="$EGRESS_BUILTIN" -v endpoints=${lib.escapeShellArg egressEndpointHosts} \
               -v allowout="$_EGRESS_ALLOWLIST_FILE" -v contractout="$_EGRESS_RULES" \
               -v B="$_C_B" -v D="$_C_D" -v R="$_C_R" -v G="$_C_G" -v Y="$_C_Y" -v Z="$_C_0" \
               "$_EGRESS_RULES.src"

@@ -4,6 +4,9 @@
 #
 #   -v deny=LIST       EGRESS_DENY, comma/space separated
 #   -v mode=MODE       EGRESS_POLICY (alert|shadow|enforce)
+#   -v endpoints=LIST  the flavor's model endpoints, "<host> <path>,<path>"
+#                      joined by ";": a deny covering one is called out, since
+#                      the proxy serves it outside the allowlist
 #   -v builtin=0|1     EGRESS_BUILTIN; 0 says in the contract that the
 #                      built-in lists were left out (the input has none)
 #   -v allowout=FILE   the allowlist the proxy, alert matcher and report read:
@@ -46,6 +49,8 @@ BEGIN {
   FS = "\t"
   nd = split(deny, raw, /[,[:space:]]+/)
   for (i = 1; i <= nd; i++) if ((d = host(raw[i])) != "" && !(d in ds)) { ds[d] = 1; dorder[++ndeny] = d }
+  nep = split(endpoints, ep, ";")
+  for (k = 1; k <= nep; k++) { split(ep[k], f, " "); ephost[k] = tolower(f[1]); epaths[k] = f[2]; gsub(/,/, ", ", epaths[k]) }
   printf "" > allowout
 }
 
@@ -87,9 +92,17 @@ END {
     for (i = 1; i <= ndeny; i++) {
       d = dorder[i]
       if (d in wide) out = out ind Y "⚠ " d " is NOT blocked — still allowed by" wide[d] Z "\n"
-      else if (d in removed) continue
+      else if (d in removed) {}
       else if ((c = cover(d)) != "") out = out ind D d ": redundant, " c " already denies it" Z "\n"
       else out = out ind D d ": nothing to remove, already unlisted" Z "\n"
+      # The sealed modes' proxy serves the model endpoints under their own
+      # path grant, which no allowlist entry gives or takes away.
+      if (mode != "alert")
+        for (k = 1; k <= nep; k++)
+          if (under(ephost[k], d)) {
+            out = out ind Y "⚠ " ephost[k] " is NOT blocked — the agent's model endpoint (" epaths[k] "), served by the proxy whatever the allowlist says" Z "\n"
+            epdenied = epdenied " " ephost[k]
+          }
     }
   }
   # Allows are a union — no order among them — listed most specific source
@@ -121,5 +134,7 @@ END {
     printf "egress: EGRESS_DENY removed %d allowlist entr%s\n", nremoved, nremoved == 1 ? "y" : "ies" > "/dev/stderr"
     for (i = 1; i <= ndeny; i++) if ((d = dorder[i]) in wide)
       printf "warning: EGRESS_DENY=%s is still allowed via:%s — the allowlist cannot carve a subdomain out of a broader entry\n", d, wide[d] > "/dev/stderr"
+    if (epdenied != "")
+      printf "warning: EGRESS_DENY covers the model endpoint%s — the proxy still serves it under its path grant; the allowlist does not govern it\n", epdenied > "/dev/stderr"
   }
 }

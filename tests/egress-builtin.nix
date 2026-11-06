@@ -31,7 +31,7 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   # What the region expects from the launcher around it.
   assemble () { # builtin allow
     ( set -euo pipefail
-      EGRESS_POLICY=''${POLICY:-enforce} EGRESS_BUILTIN=$1 EGRESS_ALLOW=$2 EGRESS_DENY=""
+      EGRESS_POLICY=''${POLICY:-enforce} EGRESS_BUILTIN=$1 EGRESS_ALLOW=$2 EGRESS_DENY=''${DENY:-}
       _EGRESS_ALLOWLIST_FILE=$PWD/allow.txt _EGRESS_RULES=$PWD/rules.txt
       _C_B= _C_D= _C_R= _C_G= _C_Y= _C_0=
       _tilde () { printf '%s' "$1"; }
@@ -52,6 +52,18 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   POLICY=alert assemble 0 ""
   if grep -q "agent's own API traffic alerts too" rules.txt; then ok "under alert the contract says the agent's API traffic alerts too"
   else bad "alert-mode contract does not say the API host alerts:"; cat rules.txt >&2; fi
+
+  # A deny that covers the model endpoint's host cannot block it: the proxy
+  # serves it under its path grant, and the contract must not suggest otherwise.
+  for b in 0 1; do
+    DENY=anthropic.com assemble $b "" 2>deny.err
+    if grep -q "api.anthropic.com is NOT blocked — the agent's model endpoint (/v1/messages)" rules.txt && grep -q "covers the model endpoint api.anthropic.com" deny.err; then
+      ok "EGRESS_BUILTIN=$b, EGRESS_DENY=anthropic.com: contract and warning say the model endpoint stays reachable"
+    else bad "EGRESS_BUILTIN=$b: a deny covering the model endpoint is not called out:"; cat rules.txt deny.err >&2; fi
+  done
+  POLICY=alert DENY=api.anthropic.com assemble 0 "" 2>deny.err
+  if grep -q "model endpoint" rules.txt deny.err; then bad "under alert, with no proxy, the deny is called an endpoint exception"
+  else ok "under alert, which has no proxy, no endpoint exception is claimed"; fi
 
   assemble 0 "example.org,example.net:8443"
   if [ "$(hosts | tr '\n' ' ')" = "example.net:8443 example.org " ]; then

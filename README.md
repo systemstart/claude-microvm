@@ -661,6 +661,10 @@ subdomains — e.g. to keep Claude Code's optional telemetry from leaving the
 VM in shadow/enforce. The format has no deny rule, so a domain still covered by
 a broader entry (`api.anthropic.com` under `anthropic.com`) cannot be removed;
 the launcher warns instead of claiming it is blocked.
+Nor does a deny reach the agent's model endpoints under `shadow`/`enforce`:
+the proxy serves them under their own path grant, not as allowlist entries, so
+`EGRESS_DENY=anthropic.com` leaves `/v1/messages` working, and the contract
+and a warning say so.
 
 `EGRESS_BUILTIN=0` leaves the baked-in default out altogether, so the
 allowlist is only what `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` name — with
