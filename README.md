@@ -186,6 +186,47 @@ shares are wired by it, and `mkRunner` refuses a guest that renamed it.
 Everything the launcher reads from the environment works as for the packaged
 flavors.
 
+### Extra shares
+
+A flake built on a flavor can share more host directories into the guest,
+beside `/work` and agent home: an input the guest may only read, or an
+output directory it writes. The guest declares each one, since QEMU's devices
+and the guest's mounts are fixed at build time; the launcher takes its host
+directory at launch:
+
+```nix
+claude-vm.lib.mkRunner {
+  inherit system;
+  modules = [ {
+    claude-vm.shares = {
+      skill     = { mountPoint = "/skill"; };                        # read-only
+      audit-out = { mountPoint = "/audit-out"; readOnly = false; };  # the guest writes it
+    };
+  } ];
+}
+```
+
+```sh
+SHARE_SKILL=~/skills/pinned SHARE_AUDIT_OUT=~/audits/project ./result/bin/microvm-run
+```
+
+- A share's host directory comes from `SHARE_<NAME>`, the name upper-cased
+  with `-` as `_`. Every declared share must be given one, since QEMU expects
+  its socket; the launcher refuses to start without it.
+- Each gets its own `virtiofsd` in the launch's slice
+  (`claude_microvm-<id>-share-<name>`), with files shown as the agent's. A
+  read-only share — the default — runs with `--readonly`, which holds against
+  root in the guest, and is mounted `ro`.
+- None may overlap the launcher's own state, in either direction, read-only
+  or not: `$XDG_DATA_HOME/<agent>-microvm` holds every project's agent home
+  and the egress logs.
+- Names are 1-16 of `a-z`, `0-9` and `-`; a mount point must stay clear of
+  `/work`, `/home/agent`, `/run/microvm`, `/nix` and the system's own
+  directories.
+
+The session contract lists each share (a writable one in yellow), and
+`instance.json` carries them under `shares`.
+
 ## Binary caches
 
 microvm.nix builds QEMU as `qemu_kvm.override { nixosTestRunner = true; }` (its
@@ -843,6 +884,7 @@ Rebuild with `make claude`.
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `AGENT_HOME` | Host directory for agent state (mounted at `/home/agent`) | `$XDG_DATA_HOME/<agent>-microvm/<hash>` |
 | `AGENT_HOME_MODE` | `persistent` (one agent home per project, kept) or `ephemeral` (a fresh one for the launch, removed with its CRI and store images when it ends; egress logs kept) — see [Home directory persistence](#home-directory-persistence) | `persistent` |
+| `SHARE_<NAME>` | Host directory for each share the guest declares in `claude-vm.shares` (flakes built with `lib.mkRunner`), the name upper-cased with `-` as `_`; required for every declared share — see [Extra shares](#extra-shares) | — |
 | `WORK_CACHE` | virtiofsd cache policy for `/work`: `auto`, `always`, `never` or `metadata` — see [Work share caching](#work-share-caching) | `auto` |
 | `AGENT_SETTINGS` | Host path to a settings file seeded into the agent home before boot (flavor-specific destination, e.g. `.claude/settings.json`) — see [Pre-seeding agent settings](#pre-seeding-agent-settings) | (none) |
 | `VM_MEM` | VM memory in MB | `8192` |

@@ -79,7 +79,7 @@
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { } }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -103,6 +103,10 @@
           # names only — values never appear anywhere near a terminal.
           contractKeyChecks = lib.concatStringsSep "\n" (map (var: ''
             if [ -n "''${${var}:-}" ]; then _CONTRACT_KEYS="$_CONTRACT_KEYS ${var}"; fi'') apiKeyVars);
+          # claude-vm.shares, in a fixed order the bash arrays below share.
+          sharesList = lib.imap0 (i: s: s // { idx = i; var = "SHARE_" + lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] s.name); })
+            (lib.mapAttrsToList (name: s: s // { inherit name; }) shares);
+          shareArray = f: "(${lib.concatMapStringsSep " " (s: lib.escapeShellArg (f s)) sharesList})";
           egressGuestEnv = lib.concatMapStringsSep "\n" (ep: ''
             echo "${ep.baseUrlVar}=http://${egressGuestAddr}${ep.prefix}" >> "$INSTANCE_ENV"
             if [ -n "''${${ep.keyVar}:-}" ]; then
@@ -302,6 +306,35 @@
           fi
           echo "warning: $_OVERLAP: the guest can write this launcher's state through the work share (agent homes, egress logs)" >&2
         fi
+        # --- Extra shares (claude-vm.shares) ---
+        # The guest declares them, so QEMU expects each one's socket: each must
+        # be given its host directory, SHARE_<NAME>, or the VM could not start.
+        # None may overlap this launcher's state, either way, read-only or not:
+        # agent homes hold other projects' sign-ins, and the egress logs are
+        # the guest's own record.
+        _SHARE_NAMES=${shareArray (s: s.name)}
+        _SHARE_VARS=${shareArray (s: s.var)}
+        _SHARE_RO=${shareArray (s: if s.readOnly then "1" else "0")}
+        _SHARE_MP=${shareArray (s: s.mountPoint)}
+        _SHARE_HOST=()
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _v="''${_SHARE_VARS[$_i]}"
+          _h="''${!_v:-}"
+          if [ -z "$_h" ]; then
+            echo "error: this VM shares a host directory at ''${_SHARE_MP[$_i]} (share ''${_SHARE_NAMES[$_i]}): set $_v=<host dir>" >&2
+            exit 1
+          fi
+          if [ ! -d "$_h" ]; then
+            echo "error: $_v=$_h is not a directory" >&2
+            exit 1
+          fi
+          _h="$(realpath "$_h")"
+          for _s in "''${_STATE_IN[@]}"; do
+            case "$_s/" in "''${_h%/}"/*) echo "error: $_v=$_h contains $_s, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          done
+          case "''${_h%/}/" in "$_DATA_DIR"/*) echo "error: $_v=$_h is inside $_DATA_DIR, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          _SHARE_HOST+=("$_h")
+        done
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -407,13 +440,18 @@
         AGENT_UNIT="$UNIT_STEM-agent-home"
         GUEST_SOCK="$_INSTANCE_PATH/guest.sock"
         GUEST_UNIT="$UNIT_STEM-guest"
+        _SHARE_SOCK=() _SHARE_UNIT=()
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _SHARE_SOCK+=("$_INSTANCE_PATH/share-''${_SHARE_NAMES[$_i]}.sock")
+          _SHARE_UNIT+=("$UNIT_STEM-share-''${_SHARE_NAMES[$_i]}")
+        done
         # sun_path is 108 bytes, NUL included. The longest default is
         # /run/user/<uid>/claude-microvm/vms/<id>/agent-home.sock, 62 bytes for
         # a 4-digit uid, leaving room for longer uids and runtime dirs;
         # tests/instance-share.nix checks a 7-digit uid's. A
         # runtime dir long enough to break it would otherwise surface as QEMU
         # or virtiofsd failing to bind, after the daemons before it had started.
-        for _s in "$QMP_SOCK" "$SOCK" "$AGENT_SOCK" "$GUEST_SOCK"; do
+        for _s in "$QMP_SOCK" "$SOCK" "$AGENT_SOCK" "$GUEST_SOCK" "''${_SHARE_SOCK[@]}"; do
           if [ "''${#_s}" -gt 107 ]; then
             echo "error: socket path too long (''${#_s} bytes, the limit is 107): $_s" >&2
             echo "       it is under XDG_RUNTIME_DIR=$RUNTIME; a shorter one avoids this" >&2
@@ -435,6 +473,9 @@
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$GUEST_UNIT" 2>/dev/null || true
+          for _u in "''${_SHARE_UNIT[@]}"; do
+            ${pkgs.systemd}/bin/systemctl --user stop "$_u" 2>/dev/null || true
+          done
           if [ -n "$EGRESS_UNIT" ]; then
             ${pkgs.systemd}/bin/systemctl --user stop "$EGRESS_UNIT" 2>/dev/null || true
           fi
@@ -585,7 +626,16 @@
         # the shadow/enforce proxy), and is null otherwise.
         _EGRESS_UNIT_NAME=""
         case "$EGRESS_POLICY" in alert|shadow|enforce) _EGRESS_UNIT_NAME="$UNIT_STEM-egress" ;; esac
+        _SHARES_JSON="[]"
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _SHARES_JSON="$(${pkgs.jq}/bin/jq -c \
+            --arg name "''${_SHARE_NAMES[$_i]}" --arg host "''${_SHARE_HOST[$_i]}" --arg guest "''${_SHARE_MP[$_i]}" \
+            --argjson readOnly "$([ "''${_SHARE_RO[$_i]}" = 1 ] && echo true || echo false)" \
+            --arg socket "''${_SHARE_SOCK[$_i]}" --arg unit "''${_SHARE_UNIT[$_i]}" \
+            '. + [{name: $name, host: $host, guest: $guest, readOnly: $readOnly, socket: $socket, unit: $unit}]' <<< "$_SHARES_JSON")"
+        done
         ${pkgs.jq}/bin/jq -n \
+          --argjson shares "$_SHARES_JSON" \
           --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
           --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" --arg guest "$INSTANCE_GUEST" \
@@ -596,6 +646,7 @@
           '{version: 1, pid: $pid, flavor: $flavor, vmId: $vmId, id: $id, started: $started,
             work: $work, agentHome: $agentHome, agentHomeMode: $agentHomeMode, guest: $guest, guestMount: "/run/microvm",
             egressPolicy: $egressPolicy,
+            shares: $shares,
             sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
             slice: $slice,
             units: {scope: (if $scopeUnit == "" then null else $scopeUnit end), work: $workUnit, agentHome: $agentHomeUnit, guest: $guestUnit,
@@ -1113,6 +1164,34 @@ EOF
         done
         [ -S "$GUEST_SOCK" ] || { echo "error: guest-share virtiofsd socket did not appear"; exit 1; }
 
+        # --- Extra shares (virtiofsd each) ---
+        # As agent home's, files shown as the agent's; --readonly unless the
+        # guest declared the share writable, which holds against root in the
+        # guest as it does for the guest share.
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _RO_ARGS=()
+          [ "''${_SHARE_RO[$_i]}" = 1 ] && _RO_ARGS=(--readonly)
+          ${pkgs.systemd}/bin/systemd-run --user --unit="''${_SHARE_UNIT[$_i]}" --collect "''${_UNIT_PROPS[@]}" \
+            "$(describe "virtiofsd for share ''${_SHARE_NAMES[$_i]} ($([ "''${_SHARE_RO[$_i]}" = 1 ] && echo read-only || echo read-write)) → ''${_SHARE_MP[$_i]}")" \
+            -- ${virtiofsd}/bin/virtiofsd \
+              --socket-path="''${_SHARE_SOCK[$_i]}" \
+              --shared-dir="''${_SHARE_HOST[$_i]}" \
+              "''${_RO_ARGS[@]}" \
+              --sandbox=namespace \
+              --uid-map ":0:$(id -u):1:" \
+              --gid-map ":0:$(id -g):1:" \
+              --translate-uid "map:1000:0:1" \
+              --translate-gid "map:1000:0:1" \
+              --socket-group="$(id -gn)"
+        done
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          for i in $(seq 1 50); do
+            [ -S "''${_SHARE_SOCK[$_i]}" ] && break
+            sleep 0.1
+          done
+          [ -S "''${_SHARE_SOCK[$_i]}" ] || { echo "error: virtiofsd socket for share ''${_SHARE_NAMES[$_i]} did not appear"; exit 1; }
+        done
+
         # $CRI_IMG is used as sed replacement text below. Escape characters
         # that are special on the replacement side (\, &) and the | delimiter
         # so a path with such characters can't corrupt the generated command.
@@ -1131,6 +1210,8 @@ EOF
           -e "s|${hostname}-virtiofs-agent-home.sock|$AGENT_SOCK|g"
           -e "s|/tmp/${hostname}-instance|$INSTANCE_GUEST|g"
           -e "s|${hostname}-virtiofs-instance.sock|$GUEST_SOCK|g"
+          ${lib.concatMapStrings (s: ''-e "s|${hostname}-virtiofs-share-${s.name}.sock|''${_SHARE_SOCK[${toString s.idx}]}|g"
+          '') sharesList}
           # QEMU's QMP socket: microvm.socket is a relative "<hostname>.sock",
           # which would land in whatever directory the launcher runs from, and
           # two launches from one directory would take it from each other.
@@ -1260,6 +1341,15 @@ EOF
         if [ -f "$INSTANCE_GUEST/nix-db.sqlite" ]; then _GUEST_HOLDS="$_GUEST_HOLDS, nix DB snapshot"; fi
         _row "guest share" ok "this launch only → /run/microvm, read-only to the guest"
         _cont "$_GUEST_HOLDS; removed when the launch ends"
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          if [ "''${_SHARE_RO[$_i]}" = 1 ]; then
+            _row share ok "$(_tilde "''${_SHARE_HOST[$_i]}") → ''${_SHARE_MP[$_i]}, read-only to the guest"
+          else
+            _row share warn "$(_tilde "''${_SHARE_HOST[$_i]}") → ''${_SHARE_MP[$_i]}, read-write"
+            _cont "the guest's writes land on the host"
+          fi
+          _hint "''${_SHARE_NAMES[$_i]}, from ''${_SHARE_VARS[$_i]}"
+        done
         if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
           _row "dev shell" bad "loaded from the project — its Nix code is evaluated on the HOST"
         else
@@ -1465,6 +1555,7 @@ EOF
           defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
           storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
           defaultStoreSize = nixosCfg.claude-vm.store.size;
+          shares = nixosCfg.claude-vm.shares;
           # The session allowlist is assembled from these at launch, each line
           # tagged with its label so the session contract can show its source.
           egressAllowlistSources =
@@ -1555,6 +1646,10 @@ EOF
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        extra-shares = import ./tests/extra-shares.nix {
+          inherit pkgs lib;
+          inherit (self.lib) mkRunner mkNixosConfig;
+        };
         downstream-api = import ./tests/downstream-api.nix {
           inherit pkgs lib;
           inherit (self.lib) flavors mkRunner;
