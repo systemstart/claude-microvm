@@ -514,6 +514,36 @@ watcher keeps going as long as QEMU runs, and ends as soon as it does. The
 session contract shows the limit, and `instance.json` carries it as
 `timeout: {seconds, graceSeconds}` (`null` without one).
 
+### Launch record
+
+`LAUNCH_RECORD=<file>` has the launcher write what the launch actually ran
+with, as JSON, for whatever drives it — a script checking that a run was as
+contained as it meant it to be, rather than trusting the settings it passed:
+
+```sh
+LAUNCH_RECORD=~/runs/42.json EGRESS_POLICY=enforce EGRESS_BUILTIN=0 make claude.run
+jq '.egress, .ended' ~/runs/42.json
+```
+
+It is written just before the VM boots and completed when the launch ends:
+
+| key | what |
+|---|---|
+| `id`, `flavor`, `booted` | the launch ID, the flavor, when the VM started |
+| `workspace` | `dir`, `mode` (`passthrough`/`ephemeral`), `guard` |
+| `agentHome` | `dir`, `mode` (`persistent`/`ephemeral`) |
+| `shares`, `timeout`, `resources` | as in `instance.json`; memory and vCPUs as passed |
+| `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants (sealed modes) |
+| `env` | the names — never the values — of the API keys and `EXTRA_ENV` passed in, and `devShellFromHost` (`DIRENV_ALLOW=1`) |
+| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, and `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce) |
+
+A record whose `ended` is still `null` after the launcher has gone is one whose
+launcher was killed. A record already at the path is removed when the launcher
+starts, so a launch that is refused before boot leaves none, rather than the
+previous run's. The file is owner-only, replaced whole on each write, and may
+not be anywhere the guest can write: inside `WORK_DIR`, this launcher's state
+(`$XDG_DATA_HOME/<agent>-microvm`), or a writable share.
+
 ### Launch scope
 
 Each launch's systemd user units share one name, `claude_microvm-<id>`, and a
@@ -910,6 +940,7 @@ Rebuild with `make claude`.
 | `VM_VCPU` | VM vCPU count | `4` |
 | `VM_TIMEOUT` | Wall-clock limit on the VM, in seconds or with an `s`/`m`/`h` suffix: then the power button, `quit` after `VM_TIMEOUT_GRACE`, and exit status 124 — see [Wall-clock limit](#wall-clock-limit) | `0` (none) |
 | `VM_TIMEOUT_GRACE` | How long the guest gets to shut down once `VM_TIMEOUT` is up, before QEMU is stopped | `60` |
+| `LAUNCH_RECORD` | File to write a JSON record of what the launch ran with, before boot, and how it ended, at exit — see [Launch record](#launch-record) | (none) |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `DIRENV_REEVAL` | Set to `1` to re-evaluate changed project Nix files on the host without the interactive prompt (see [Hardening notes](#hardening-notes)) | (prompt) |
 | `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.mcp.json`, `.claude/commands`, …) read-only inside the guest | (off) |

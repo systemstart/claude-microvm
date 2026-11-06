@@ -118,6 +118,13 @@
           launcher = pkgs.writeShellScriptBin "microvm-run" ''
         set -euo pipefail
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
+        # A launch record left at LAUNCH_RECORD by an earlier launch goes first,
+        # before anything here can refuse to start: a launch that never boots
+        # must not leave the last one's record standing for its own. Where the
+        # record may go is checked below ("Launch record").
+        if [ -n "''${LAUNCH_RECORD:-}" ] && [ -f "$LAUNCH_RECORD" ] && [ ! -L "$LAUNCH_RECORD" ]; then
+          rm -f "$LAUNCH_RECORD"
+        fi
         # Derive project basename for host-visible identifiers
         WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
         [ -z "$WORK_BASENAME" ] && WORK_BASENAME="root"
@@ -349,6 +356,34 @@
           case "''${_h%/}/" in "$_DATA_DIR"/*) echo "error: $_v=$_h is inside $_DATA_DIR, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
           _SHARE_HOST+=("$_h")
         done
+        # --- Launch record (LAUNCH_RECORD) ---
+        # What this launch actually ran with, as JSON, for whatever drove it —
+        # written just before boot, completed with its outcome at exit; see
+        # README "Launch record". Evidence, so nowhere the guest can write:
+        # not the work share, not this launcher's state, not a writable share.
+        # (An earlier launch's record was removed at the very start.)
+        _RECORD=""
+        if [ -n "''${LAUNCH_RECORD:-}" ]; then
+          _RECORD="$(realpath -m "$LAUNCH_RECORD")"
+          if [ ! -d "$(dirname "$_RECORD")" ]; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $(dirname "$_RECORD") is not a directory" >&2
+            exit 1
+          fi
+          if [ -L "$LAUNCH_RECORD" ] || { [ -e "$_RECORD" ] && [ ! -f "$_RECORD" ]; }; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is not a regular file" >&2
+            exit 1
+          fi
+          _GUEST_WRITES=("$_W" "$_DATA_DIR")
+          for _i in "''${!_SHARE_NAMES[@]}"; do
+            [ "''${_SHARE_RO[$_i]}" = 1 ] || _GUEST_WRITES+=("''${_SHARE_HOST[$_i]%/}")
+          done
+          for _g in "''${_GUEST_WRITES[@]}"; do
+            case "$_RECORD" in "$_g"/*)
+              echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is inside $_g, which the guest can write" >&2
+              exit 1 ;;
+            esac
+          done
+        fi
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -1456,6 +1491,49 @@ EOF
           read -r -p "press Enter to boot (NO_PAUSE=1 to skip this) … " _ || true
         fi
 
+        # The launch record, as of boot. Names only, never values, as in the
+        # contract. Written whole (a new file renamed into place) and owner-only.
+        _record_write () { # json
+          printf '%s\n' "$1" > "$_RECORD.new"
+          chmod 600 "$_RECORD.new"
+          mv -f "$_RECORD.new" "$_RECORD"
+        }
+        _RECORD_JSON=""
+        if [ -n "$_RECORD" ]; then
+          _words () { ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args $1; }
+          _DENY_WORDS="''${EGRESS_DENY:-}"; _DENY_WORDS="''${_DENY_WORDS//,/ }"
+          _ALLOW_SHA=""
+          if [ -n "$_EGRESS_ALLOWLIST_FILE" ] && [ -f "$_EGRESS_ALLOWLIST_FILE" ]; then
+            _ALLOW_SHA="$(sha256sum "$_EGRESS_ALLOWLIST_FILE" | cut -d' ' -f1)"
+          fi
+          _RECORD_JSON="$(${pkgs.jq}/bin/jq -cn \
+            --arg id "$ID" --arg flavor ${lib.escapeShellArg agentName} --arg booted "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg work "$WORK" --arg workspaceMode "$WORKSPACE_MODE" --arg guard "''${WORKSPACE_GUARD:-}" \
+            --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" \
+            --argjson shares "$_SHARES_JSON" \
+            --argjson timeout "$_TIMEOUT_S" --argjson grace "$_GRACE_S" \
+            --arg mem "$VM_MEM" --arg vcpu "$VM_VCPU" \
+            --arg policy "$EGRESS_POLICY" --arg builtin "$EGRESS_BUILTIN" \
+            --argjson deny "$(_words "$_DENY_WORDS")" \
+            --arg allowlist "$_EGRESS_ALLOWLIST_FILE" --arg allowlistSha256 "$_ALLOW_SHA" --arg auditLog "$EGRESS_AUDIT" \
+            --argjson endpoints ${lib.escapeShellArg (builtins.toJSON (map (ep: { inherit (ep) prefix upstream allowedPaths; }) flavorEndpoints))} \
+            --argjson keys "$(_words "$_CONTRACT_KEYS")" --argjson extraEnv "$(_words "$_CONTRACT_EXTRA")" \
+            --arg direnv "''${DIRENV_ALLOW:-0}" \
+            '{version: 1, id: $id, flavor: $flavor, booted: $booted,
+              workspace: {dir: $work, mode: $workspaceMode, guard: ($guard == "1")},
+              agentHome: {dir: $agentHome, mode: $agentHomeMode},
+              shares: $shares,
+              timeout: (if $timeout == 0 then null else {seconds: $timeout, graceSeconds: $grace} end),
+              resources: {memMiB: ($mem | tonumber? // $mem), vcpus: ($vcpu | tonumber? // $vcpu)},
+              egress: {policy: $policy, builtinAllowlists: ($builtin == "1"), deny: $deny,
+                       allowlist: (if $allowlist == "" then null else {file: $allowlist, sha256: $allowlistSha256} end),
+                       auditLog: (if $auditLog == "" then null else $auditLog end),
+                       endpoints: (if ($policy == "shadow" or $policy == "enforce") then $endpoints else [] end)},
+              env: {apiKeys: $keys, extraEnv: $extraEnv, devShellFromHost: ($direnv == "1")},
+              ended: null}')"
+          _record_write "$_RECORD_JSON"
+        fi
+
         # --- Wall-clock limit (VM_TIMEOUT) ---
         # A watcher started with the VM, not a timer the launcher sleeps on: it
         # holds the limit even if the launcher itself is killed outright, as
@@ -1548,6 +1626,17 @@ EOF
             echo "egress audit log saved: $EGRESS_AUDIT"
             ;;
         esac
+        # The record, completed: how the launch ended. A record whose `ended`
+        # is still null is one whose launcher never got here — killed.
+        if [ -n "$_RECORD" ]; then
+          _record_write "$(${pkgs.jq}/bin/jq -c \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson status "$_VM_RC" \
+            --argjson timedOut "$([ -e "$INSTANCE_DIR/timed-out" ] && echo true || echo false)" \
+            --argjson allowed "''${_allow:-null}" --argjson denied "''${_deny:-null}" --argjson wouldDeny "''${_would:-null}" \
+            '.ended = {at: $at, exitStatus: $status, timedOut: $timedOut,
+                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end)}' \
+            <<< "$_RECORD_JSON")"
+        fi
         exit "$_VM_RC"
       '';
         # microvm-stop beside microvm-run, so a launch can name it in its
@@ -1707,6 +1796,10 @@ EOF
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        launch-record = import ./tests/launch-record.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
         vm-timeout = import ./tests/vm-timeout.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;

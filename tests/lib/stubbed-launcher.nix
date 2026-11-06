@@ -56,6 +56,14 @@ rec {
   printf '%s\n' "''${opts[@]}" > "$LOG/$unit.opts"
   [ -n "$scope" ] && exec "$@"
   printf '%s\n' "$@" > "$LOG/$unit.args"
+  # The egress proxy runs for real (it needs no privileges and listens on
+  # loopback), so a sealed launch gets its portfile and audit log; the
+  # launcher's environment already holds what --setenv would pass.
+  case "$1" in */bin/egress-proxy)
+    "$@" > "$LOG/$unit.log" 2>&1 </dev/null &
+    echo $! > "$LOG/$unit.pid"
+    exit 0 ;;
+  esac
   for a in "$@"; do case "$a" in --socket-path=*) sock="''${a#--socket-path=}" ;; esac; done
   ${pkgs.socat}/bin/socat UNIX-LISTEN:"$sock",fork /dev/null &
   echo $! > "$LOG/$unit.pid"
