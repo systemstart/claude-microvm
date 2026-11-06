@@ -101,7 +101,12 @@ END {
     s = ""; for (j = 1; j <= n; j++) { split(es[j], em, "|"); s = s " " em[2] em[1] }
     out = out paint(wrap(s, ind))
   }
-  if (builtin == "0")
+  # The model endpoints are the proxy's, so only the sealed modes exempt them;
+  # under alert, which only watches, the agent's API host is one more
+  # off-list destination.
+  if (builtin == "0" && mode == "alert")
+    out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above; the agent's own API traffic alerts too" Z "\n"
+  else if (builtin == "0")
     out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above, and the agent's model endpoints" Z "\n"
   if (mode == "enforce") last = R "deny " Z " " B "everything else" Z D ", and any port an entry does not grant" Z
   else if (mode == "shadow") last = Y "log  " Z " " B "everything else" Z D " as would_deny — nothing is blocked yet" Z

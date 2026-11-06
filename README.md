@@ -671,7 +671,10 @@ allowlist entry but a reverse-proxied endpoint with its own path grant, which
 this does not touch. What the agent loses is everything else it talks to
 (update checks, telemetry, plugin installs); with Claude Code,
 `EXTRA_ENV=CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps it from trying.
-The session contract says when the built-in lists are off.
+The session contract says when the built-in lists are off. Under `alert`, which
+only watches and has no proxy, the model API is an ordinary destination: with
+the built-ins off, the agent's own API traffic alerts too unless
+`EGRESS_ALLOW` names its host.
 
 An entry matches itself and every subdomain. Alerts never block — a flagged
 domain is a line in a log and in the session-end report, nothing more.

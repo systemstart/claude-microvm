@@ -38,12 +38,14 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   # --- what killed launchers left, for the sweep ---------------------------------
   mkdir -p $EPH/aaaaaaaaaaaa/home/.cache/ro $EPH/bbbbbbbbbbbb/home $EPH/keep-me
   chmod 555 $EPH/aaaaaaaaaaaa/home/.cache/ro
-  # A launch still running: its instance lock is held.
-  mkdir -p $XDG_RUNTIME_DIR/claude-microvm/vms/bbbbbbbbbbbb
-  # Held by this shell on a descriptor of its own, not by a background
+  # A launch still running: its home is locked, as the launcher locks its
+  # own — by this shell, on a descriptor of its own, not by a background
   # process, which would keep the build log open after the test ends.
-  exec {held}>$XDG_RUNTIME_DIR/claude-microvm/vms/bbbbbbbbbbbb/lock
+  exec {held}<$EPH/bbbbbbbbbbbb
   flock -n $held
+  # A symlink under a launch-ID name, to a tree the sweep must not touch.
+  mkdir -p $TMPDIR/victim/sub; chmod 555 $TMPDIR/victim/sub
+  ln -s $TMPDIR/victim $EPH/cccccccccccc
 
   # --- one ephemeral launch ---------------------------------------------------------
   HOLD=$TMPDIR/release
@@ -62,6 +64,16 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   [ ! -e $EPH/aaaaaaaaaaaa ] && ok "a dead launch's dir is swept, read-only contents and all" || bad "dead launch's dir was not swept"
   [ -d $EPH/bbbbbbbbbbbb ] && ok "a live launch's dir is left alone" || bad "a live launch's dir was swept"
   [ -d $EPH/keep-me ] && ok "a dir that is not named by a launch ID is left alone" || bad "keep-me was swept"
+  [ -L $EPH/cccccccccccc ] && [ "$(stat -c %a $TMPDIR/victim/sub)" = 555 ] \
+    && ok "a symlink is neither followed nor removed" || bad "the sweep followed or removed a symlink: $(stat -c %a $TMPDIR/victim/sub)"
+  # A second launch on the same data dir but its own runtime dir, so it
+  # cannot see the first one's instance lock: its sweep must still leave the
+  # first one's home, which it knows is live by the home's own lock.
+  mkdir -p $TMPDIR/rt2
+  launch other AGENT_HOME_MODE=ephemeral XDG_RUNTIME_DIR=$TMPDIR/rt2
+  if [ "$(cat $TMPDIR/other/rc)" = 0 ] && [ -d "$EPH/$ID/home" ]; then
+    ok "a launch with another runtime dir leaves a running launch's home alone"
+  else bad "the other launch (rc $(cat $TMPDIR/other/rc)) swept the running launch's home"; cat $TMPDIR/other/out >&2; fi
   touch $HOLD; wait
   exec {held}>&-
 

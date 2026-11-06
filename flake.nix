@@ -419,7 +419,7 @@
           # leaves read-only directories (Go's module cache, for one), so they
           # are made writable first.
           if [ -n "$AGENT_TEMP" ]; then
-            chmod -R u+w "$AGENT_TEMP" 2>/dev/null || true
+            chmod -R -P u+w "$AGENT_TEMP" 2>/dev/null || true
             rm -rf "$AGENT_TEMP"
           fi
           # This launch's instance dir goes with it: guest/ — env (API keys
@@ -503,22 +503,34 @@
           _EPHEMERAL_ROOT="$DATA_HOME/${dataDirName}/.ephemeral"
           mkdir -p "$_EPHEMERAL_ROOT"
           chmod 700 "$_EPHEMERAL_ROOT"
-          # What a launcher killed outright left behind: a dir whose launch no
-          # longer holds its instance lock (gone at reboot with the runtime
-          # dir, or released when the launcher and QEMU went). The lock is
-          # opened read-only and never created, as microvm-stop does.
-          for _d in "$_EPHEMERAL_ROOT"/*/; do
-            _d="''${_d%/}"; _n="$(basename "$_d")"
-            [[ "$_n" =~ ^[0-9a-f]{12}$ ]] && [ "$_n" != "$ID" ] || continue
-            if { exec {_fd}<"$INSTANCE_VMS/$_n/lock"; } 2>/dev/null; then
-              if ! ${pkgs.util-linux}/bin/flock -n "$_fd"; then exec {_fd}<&-; continue; fi
-              exec {_fd}<&-
-            fi
-            chmod -R u+w "$_d" 2>/dev/null || true
-            rm -rf "$_d"
-          done
-          mkdir -m 700 "$_EPHEMERAL_ROOT/$ID"
+          # Each home is locked by its own directory, held — by this launcher
+          # and, inherited, by QEMU — for as long as the launch runs. Not by
+          # the instance lock: that is under XDG_RUNTIME_DIR, this under
+          # XDG_DATA_HOME, and two launches sharing one need not share the
+          # other. The dir is made under a name the sweep below ignores and
+          # locked before it is renamed into place, so no sweep ever sees it
+          # unlocked; the rename keeps the inode, and with it the lock.
+          mkdir -m 700 "$_EPHEMERAL_ROOT/$ID.new"
+          exec {_EPHEMERAL_LOCK_FD}<"$_EPHEMERAL_ROOT/$ID.new"
+          ${pkgs.util-linux}/bin/flock -n "$_EPHEMERAL_LOCK_FD"
+          mv -T "$_EPHEMERAL_ROOT/$ID.new" "$_EPHEMERAL_ROOT/$ID"
           AGENT_TEMP="$_EPHEMERAL_ROOT/$ID"
+          # What a launcher killed outright left behind: a home whose lock can
+          # be taken. It is removed while holding that lock, so a launch still
+          # running is never touched. Symlinks are skipped and never followed
+          # (-P): should XDG_DATA_HOME sit inside a share, a guest could plant
+          # one here pointing anywhere.
+          for _d in "$_EPHEMERAL_ROOT"/*; do
+            _n="$(basename "$_d")"
+            [[ "$_n" =~ ^[0-9a-f]{12}$ ]] && [ "$_n" != "$ID" ] || continue
+            [ -d "$_d" ] && [ ! -L "$_d" ] || continue
+            { exec {_fd}<"$_d"; } 2>/dev/null || continue
+            if ${pkgs.util-linux}/bin/flock -n "$_fd"; then
+              chmod -R -P u+w "$_d" 2>/dev/null || true
+              rm -rf "$_d"
+            fi
+            exec {_fd}<&-
+          done
           AGENT_HOME="$AGENT_TEMP/home"
         elif [ -z "''${AGENT_HOME:-}" ]; then
           AGENT_HOME="$PROJECT_HOME"

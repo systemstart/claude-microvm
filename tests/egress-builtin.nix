@@ -31,7 +31,7 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   # What the region expects from the launcher around it.
   assemble () { # builtin allow
     ( set -euo pipefail
-      EGRESS_POLICY=enforce EGRESS_BUILTIN=$1 EGRESS_ALLOW=$2 EGRESS_DENY=""
+      EGRESS_POLICY=''${POLICY:-enforce} EGRESS_BUILTIN=$1 EGRESS_ALLOW=$2 EGRESS_DENY=""
       _EGRESS_ALLOWLIST_FILE=$PWD/allow.txt _EGRESS_RULES=$PWD/rules.txt
       _C_B= _C_D= _C_R= _C_G= _C_Y= _C_0=
       _tilde () { printf '%s' "$1"; }
@@ -48,6 +48,10 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   assemble 0 ""
   if [ -z "$(hosts)" ]; then ok "EGRESS_BUILTIN=0 alone allows no host"; else bad "EGRESS_BUILTIN=0 still allows: $(hosts | tr '\n' ' ')"; fi
   if grep -q 'built-in lists.*EGRESS_BUILTIN=0' rules.txt; then ok "the contract says the built-in lists are off"; else bad "the contract does not say so:"; cat rules.txt >&2; fi
+
+  POLICY=alert assemble 0 ""
+  if grep -q "agent's own API traffic alerts too" rules.txt; then ok "under alert the contract says the agent's API traffic alerts too"
+  else bad "alert-mode contract does not say the API host alerts:"; cat rules.txt >&2; fi
 
   assemble 0 "example.org,example.net:8443"
   if [ "$(hosts | tr '\n' ' ')" = "example.net:8443 example.org " ]; then
