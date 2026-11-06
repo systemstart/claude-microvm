@@ -330,6 +330,30 @@ AGENT_HOME=~/.my-agent-home make claude.run
 
 This mounts the host directory at `/home/agent` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping.
 
+To start from an empty agent home instead, and leave none behind, set
+`AGENT_HOME_MODE=ephemeral`:
+
+```sh
+AGENT_HOME_MODE=ephemeral make claude.run
+```
+
+The launch then gets one of its own,
+`$XDG_DATA_HOME/<agent>-microvm/.ephemeral/<id>/home` (the launch ID; on disk,
+since agent homes hold caches that run to gigabytes), and it is removed when
+the launch ends, together with what would otherwise sit beside the project's
+home: the CRI image and the store disk. Nothing the guest wrote there — shell
+rc files, agent settings and hooks, skills, a container image cache — reaches
+the next launch. The egress logs are the exception, on purpose: they go to the
+project's usual `<basename>-<hash>-egress`, the record of what each launch did.
+A launcher killed outright leaves its directory behind; the next ephemeral
+launch of the same flavor removes every one whose launch is no longer running.
+
+It cannot be combined with `AGENT_HOME` (the launch picks the directory), nor
+with `DIRENV_ALLOW=1`: the dev shell's guard against evaluating Nix files a
+guest rewrote remembers its last evaluation in agent home, and a fresh one
+would let every evaluation through unprompted. Signing in by OAuth leaves
+nothing to reuse either, so ephemeral homes go with an API key.
+
 ### Per-launch instance directory
 
 Each launch keeps what is its alone in one directory under the runtime dir:
@@ -806,6 +830,7 @@ Rebuild with `make claude`.
 |----------|-------------|---------|
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `AGENT_HOME` | Host directory for agent state (mounted at `/home/agent`) | `$XDG_DATA_HOME/<agent>-microvm/<hash>` |
+| `AGENT_HOME_MODE` | `persistent` (one agent home per project, kept) or `ephemeral` (a fresh one for the launch, removed with its CRI and store images when it ends; egress logs kept) — see [Home directory persistence](#home-directory-persistence) | `persistent` |
 | `WORK_CACHE` | virtiofsd cache policy for `/work`: `auto`, `always`, `never` or `metadata` — see [Work share caching](#work-share-caching) | `auto` |
 | `AGENT_SETTINGS` | Host path to a settings file seeded into the agent home before boot (flavor-specific destination, e.g. `.claude/settings.json`) — see [Pre-seeding agent settings](#pre-seeding-agent-settings) | (none) |
 | `VM_MEM` | VM memory in MB | `8192` |
@@ -948,7 +973,8 @@ and what you can do about each:
 | `$AGENT_HOME-store/nix-store-overlay.img` | per-run, ~69 MiB, deleted on exit along with its directory | build-time only: `claude-vm.store.diskBacked = false` |
 | `$XDG_RUNTIME_DIR/claude-microvm/vms/<id>/` (env file with API keys, CA certs, nix DB snapshot ~97 MiB; sockets) | per-run, on tmpfs, deleted on exit — or at logout/reboot if the launcher is killed | — |
 | `$XDG_RUNTIME_DIR/claude-microvm/` and its `vms/`, empty | on tmpfs, until logout/reboot | — |
-| `$AGENT_HOME` (agent state, dev-shell cache) | persistent | point `AGENT_HOME` somewhere disposable |
+| `$AGENT_HOME` (agent state, dev-shell cache) | persistent | `AGENT_HOME_MODE=ephemeral`: a fresh one per launch, removed with its CRI and store images on exit (or by the next ephemeral launch if the launcher is killed) |
+| `$AGENT_HOME-egress/` (egress logs, reports) | persistent, under `EGRESS_POLICY` other than `open`; also under `AGENT_HOME_MODE=ephemeral`, beside the project's home | delete it; `EGRESS_POLICY=open` writes none |
 
 The CRI disk used to be created on every launch whether or not `ENABLE_CRI` was
 set, and it is never deleted. It is now only created for a run that asks for

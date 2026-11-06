@@ -244,6 +244,30 @@
             echo "error: WORKSPACE_MODE must be passthrough or ephemeral (got '$WORKSPACE_MODE')" >&2
             exit 1 ;;
         esac
+        # persistent: one agent home per project, kept across launches.
+        # ephemeral: a fresh one for this launch, removed when it ends — see
+        # "Agent home" below.
+        AGENT_HOME_MODE="''${AGENT_HOME_MODE:-persistent}"
+        case "$AGENT_HOME_MODE" in
+          persistent) ;;
+          ephemeral)
+            if [ -n "''${AGENT_HOME:-}" ]; then
+              echo "error: AGENT_HOME_MODE=ephemeral makes its own agent home for the launch; unset AGENT_HOME (got '$AGENT_HOME')" >&2
+              exit 1
+            fi
+            # The dev-shell fence prompts before re-evaluating Nix files that
+            # changed since its last evaluation, which it remembers in agent
+            # home. A fresh one remembers nothing, so every evaluation would
+            # pass as a first one — including of a flake.nix an earlier guest
+            # rewrote.
+            if [ "''${DIRENV_ALLOW:-0}" = 1 ]; then
+              echo "error: DIRENV_ALLOW=1 cannot be combined with AGENT_HOME_MODE=ephemeral: with no agent home to remember what it evaluated, every launch would evaluate the project's Nix code on the host unprompted" >&2
+              exit 1
+            fi ;;
+          *)
+            echo "error: AGENT_HOME_MODE must be persistent or ephemeral (got '$AGENT_HOME_MODE')" >&2
+            exit 1 ;;
+        esac
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -391,7 +415,11 @@
             # gone, so drop it unless something else put files there.
             rmdir "$STORE_STATE_DIR" 2>/dev/null || true
           fi
+          # An ephemeral agent home, with its CRI and store images. The guest
+          # leaves read-only directories (Go's module cache, for one), so they
+          # are made writable first.
           if [ -n "$AGENT_TEMP" ]; then
+            chmod -R u+w "$AGENT_TEMP" 2>/dev/null || true
             rm -rf "$AGENT_TEMP"
           fi
           # This launch's instance dir goes with it: guest/ — env (API keys
@@ -459,10 +487,41 @@
         [ -S "$SOCK" ] || { echo "error: virtiofsd socket did not appear"; exit 1; }
 
         # --- Agent home share (virtiofsd) ---
-        if [ -z "''${AGENT_HOME:-}" ]; then
-          DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
-          WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
-          AGENT_HOME="$DATA_HOME/${dataDirName}/$WORK_BASENAME-$WORK_HASH"
+        DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
+        WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
+        # The project's own agent home. An ephemeral launch does not use it,
+        # but its egress logs still go beside it (EGRESS_DIR below): they are
+        # the record of what the launch did, and outlive it on purpose.
+        PROJECT_HOME="$DATA_HOME/${dataDirName}/$WORK_BASENAME-$WORK_HASH"
+        if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+          # On disk, not in the runtime dir: an agent home holds caches that
+          # run to gigabytes. Named by the launch ID, like the instance dir,
+          # and holding what would otherwise be agent home's siblings — the
+          # CRI and store images — so that nothing of the launch outlives it
+          # but its egress logs. A container image cache kept across launches
+          # would carry state from one into the next.
+          _EPHEMERAL_ROOT="$DATA_HOME/${dataDirName}/.ephemeral"
+          mkdir -p "$_EPHEMERAL_ROOT"
+          chmod 700 "$_EPHEMERAL_ROOT"
+          # What a launcher killed outright left behind: a dir whose launch no
+          # longer holds its instance lock (gone at reboot with the runtime
+          # dir, or released when the launcher and QEMU went). The lock is
+          # opened read-only and never created, as microvm-stop does.
+          for _d in "$_EPHEMERAL_ROOT"/*/; do
+            _d="''${_d%/}"; _n="$(basename "$_d")"
+            [[ "$_n" =~ ^[0-9a-f]{12}$ ]] && [ "$_n" != "$ID" ] || continue
+            if { exec {_fd}<"$INSTANCE_VMS/$_n/lock"; } 2>/dev/null; then
+              if ! ${pkgs.util-linux}/bin/flock -n "$_fd"; then exec {_fd}<&-; continue; fi
+              exec {_fd}<&-
+            fi
+            chmod -R u+w "$_d" 2>/dev/null || true
+            rm -rf "$_d"
+          done
+          mkdir -m 700 "$_EPHEMERAL_ROOT/$ID"
+          AGENT_TEMP="$_EPHEMERAL_ROOT/$ID"
+          AGENT_HOME="$AGENT_TEMP/home"
+        elif [ -z "''${AGENT_HOME:-}" ]; then
+          AGENT_HOME="$PROJECT_HOME"
         fi
         AGENT_DIR="$(realpath "$AGENT_HOME" 2>/dev/null || echo "$AGENT_HOME")"
         if [ ! -d "$AGENT_DIR" ]; then
@@ -479,13 +538,13 @@
         ${pkgs.jq}/bin/jq -n \
           --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
           --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg guest "$INSTANCE_GUEST" \
+          --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" --arg guest "$INSTANCE_GUEST" \
           --arg egressPolicy "$EGRESS_POLICY" \
           --arg qmp "$QMP_SOCK" --arg workSock "$SOCK" --arg agentHomeSock "$AGENT_SOCK" --arg guestSock "$GUEST_SOCK" \
           --arg scopeUnit "$_MICROVM_SCOPE" --arg slice "$SLICE" \
           --arg workUnit "$UNIT" --arg agentHomeUnit "$AGENT_UNIT" --arg guestUnit "$GUEST_UNIT" --arg egressUnit "$_EGRESS_UNIT_NAME" \
           '{version: 1, pid: $pid, flavor: $flavor, vmId: $vmId, id: $id, started: $started,
-            work: $work, agentHome: $agentHome, guest: $guest, guestMount: "/run/microvm",
+            work: $work, agentHome: $agentHome, agentHomeMode: $agentHomeMode, guest: $guest, guestMount: "/run/microvm",
             egressPolicy: $egressPolicy,
             sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
             slice: $slice,
@@ -513,8 +572,14 @@
           # Host-only sibling of the agent dir, like the CRI image: $AGENT_DIR
           # itself is exported into the guest, and the guest must not be able
           # to rewrite the record of its own traffic. Traffic metadata is
-          # sensitive, so the directory is owner-only.
-          EGRESS_DIR="$AGENT_DIR-egress"
+          # sensitive, so the directory is owner-only. An ephemeral agent home
+          # goes with its launch, so its egress logs go beside the project's
+          # own home instead, where every launch on the project keeps them.
+          if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+            EGRESS_DIR="$PROJECT_HOME-egress"
+          else
+            EGRESS_DIR="$AGENT_DIR-egress"
+          fi
           mkdir -p "$EGRESS_DIR"
           chmod 700 "$EGRESS_DIR"
           _EGRESS_STAMP="$(date +%Y%m%d-%H%M%S)-''${ID%%-*}"
@@ -1131,7 +1196,13 @@ EOF
           _cont "virtiofs cache: $WORK_CACHE"
         fi
         _row "agent home" "" "$(_tilde "$AGENT_DIR") → /home/agent"
-        _cont "persists across sessions"
+        if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+          _cont "this launch only: removed when it ends, CRI and store images with it"
+          _cont "egress logs kept in $(_tilde "$PROJECT_HOME")-egress"
+        else
+          _cont "persists across sessions"
+          _hint "AGENT_HOME_MODE=ephemeral starts from an empty one"
+        fi
         # The third share, and the one API keys arrive by: what this launch
         # hands the guest (see "Instance dir"). Listed as it actually is.
         _GUEST_HOLDS="env"
@@ -1463,6 +1534,10 @@ EOF
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
           config = self.nixosConfigurations."claude-${system}".config;
+        };
+        agent-home-ephemeral = import ./tests/agent-home-ephemeral.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
         };
         seed-idempotence = import ./tests/seed-idempotence.nix {
           inherit pkgs lib;
