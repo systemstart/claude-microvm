@@ -89,6 +89,10 @@
           # Bash fragments for the shadow/enforce wiring, one per endpoint.
           # keyEnv is decided at launch: the var's presence on the host picks
           # between injection and OAuth passthrough.
+          # "<host> <path>,<path>" per endpoint, ";"-joined, for the contract's
+          # note on a deny that covers one (scripts/egress-rules.awk).
+          egressEndpointHosts = lib.concatMapStringsSep ";" (ep:
+            "${lib.head (lib.splitString "/" (lib.removePrefix "https://" ep.upstream))} ${lib.concatStringsSep "," ep.allowedPaths}") flavorEndpoints;
           egressEndpointJson = lib.concatMapStringsSep "\n" (ep: ''
             _EGRESS_EP_KEYENV=""
             if [ -n "''${${ep.keyVar}:-}" ]; then _EGRESS_EP_KEYENV="${ep.keyVar}"; fi
@@ -216,6 +220,23 @@
               echo "warning: EGRESS_ALLOW / EGRESS_ALLOWLIST / EGRESS_DENY are only read by EGRESS_POLICY=alert|shadow|enforce — ignored" >&2
             fi ;;
         esac
+        # EGRESS_BUILTIN=0 drops the built-in allowlists (microvm-policy's
+        # common.txt and the flavor's own), leaving only EGRESS_ALLOWLIST and
+        # EGRESS_ALLOW. The agent's model endpoints are on no allowlist — the
+        # proxy reverse-proxies them under their own path grant — so they stay
+        # reachable.
+        EGRESS_BUILTIN="''${EGRESS_BUILTIN:-1}"
+        case "$EGRESS_BUILTIN" in
+          0|1) ;;
+          *)
+            echo "error: EGRESS_BUILTIN must be 1 (the built-in allowlists apply) or 0 (only EGRESS_ALLOWLIST and EGRESS_ALLOW) (got '$EGRESS_BUILTIN')" >&2
+            exit 1 ;;
+        esac
+        if [ "$EGRESS_BUILTIN" = 0 ]; then
+          case "$EGRESS_POLICY" in
+            open|monitor) echo "warning: EGRESS_BUILTIN is only read by EGRESS_POLICY=alert|shadow|enforce — ignored" >&2 ;;
+          esac
+        fi
         if ! [[ "''${EGRESS_PCAP_MAXLEN:-4096}" =~ ^[0-9]+$ ]]; then
           echo "error: EGRESS_PCAP_MAXLEN must be an integer (captured bytes per packet)" >&2
           exit 1
@@ -227,6 +248,60 @@
             echo "error: WORKSPACE_MODE must be passthrough or ephemeral (got '$WORKSPACE_MODE')" >&2
             exit 1 ;;
         esac
+        # persistent: one agent home per project, kept across launches.
+        # ephemeral: a fresh one for this launch, removed when it ends — see
+        # "Agent home" below.
+        AGENT_HOME_MODE="''${AGENT_HOME_MODE:-persistent}"
+        case "$AGENT_HOME_MODE" in
+          persistent) ;;
+          ephemeral)
+            if [ -n "''${AGENT_HOME:-}" ]; then
+              echo "error: AGENT_HOME_MODE=ephemeral makes its own agent home for the launch; unset AGENT_HOME (got '$AGENT_HOME')" >&2
+              exit 1
+            fi
+            # The dev-shell fence prompts before re-evaluating Nix files that
+            # changed since its last evaluation, which it remembers in agent
+            # home. A fresh one remembers nothing, so every evaluation would
+            # pass as a first one — including of a flake.nix an earlier guest
+            # rewrote.
+            if [ "''${DIRENV_ALLOW:-0}" = 1 ]; then
+              echo "error: DIRENV_ALLOW=1 cannot be combined with AGENT_HOME_MODE=ephemeral: with no agent home to remember what it evaluated, every launch would evaluate the project's Nix code on the host unprompted" >&2
+              exit 1
+            fi ;;
+          *)
+            echo "error: AGENT_HOME_MODE must be persistent or ephemeral (got '$AGENT_HOME_MODE')" >&2
+            exit 1 ;;
+        esac
+        # The launcher's own host state — agent homes, the ephemeral ones and
+        # their sweep, the egress logs beside them — must not lie inside the
+        # work share, or the guest can write it: rewrite the record of its own
+        # traffic, plant files in the next launch's home, or swap the paths
+        # the sweep is about to remove. Nor may the work share lie inside that
+        # state — the .ephemeral dir, another launch's home — which would hand
+        # the guest every home there. An ephemeral launch refuses either; a
+        # persistent one, which always ran like this, is warned.
+        #
+        # The data dir is checked both ways. An explicit AGENT_HOME is checked
+        # by its parent, where its -egress/-cri/-store siblings live, and only
+        # for lying inside the work share: a project beside ~/.my-agent-home
+        # is inside that parent ($HOME) and is no overlap.
+        _DATA_DIR="$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")"
+        _STATE_IN=("$_DATA_DIR")
+        if [ -n "''${AGENT_HOME:-}" ]; then _STATE_IN+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
+        # "" for WORK=/, so that "$_W"/* matches every absolute path.
+        _W="''${WORK%/}"
+        _OVERLAP=""
+        for _s in "''${_STATE_IN[@]}"; do
+          case "$_s/" in "$_W"/*) _OVERLAP="$_s is inside WORK_DIR=$WORK"; break ;; esac
+        done
+        case "$_W/" in "$_DATA_DIR"/*) _OVERLAP="WORK_DIR=$WORK is inside $_DATA_DIR" ;; esac
+        if [ -n "$_OVERLAP" ]; then
+          if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+            echo "error: $_OVERLAP, and the guest can write the work share; AGENT_HOME_MODE=ephemeral needs this launcher's state out of the guest's reach — use a WORK_DIR that neither contains it nor lies inside it" >&2
+            exit 1
+          fi
+          echo "warning: $_OVERLAP: the guest can write this launcher's state through the work share (agent homes, egress logs)" >&2
+        fi
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -374,7 +449,11 @@
             # gone, so drop it unless something else put files there.
             rmdir "$STORE_STATE_DIR" 2>/dev/null || true
           fi
+          # An ephemeral agent home, with its CRI and store images. The guest
+          # leaves read-only directories (Go's module cache, for one), so they
+          # are made writable first.
           if [ -n "$AGENT_TEMP" ]; then
+            chmod -R -P u+w "$AGENT_TEMP" 2>/dev/null || true
             rm -rf "$AGENT_TEMP"
           fi
           # This launch's instance dir goes with it: guest/ — env (API keys
@@ -442,10 +521,57 @@
         [ -S "$SOCK" ] || { echo "error: virtiofsd socket did not appear"; exit 1; }
 
         # --- Agent home share (virtiofsd) ---
-        if [ -z "''${AGENT_HOME:-}" ]; then
-          DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
-          WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
-          AGENT_HOME="$DATA_HOME/${dataDirName}/$WORK_BASENAME-$WORK_HASH"
+        DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
+        WORK_HASH="$(echo -n "$WORK" | sha256sum | cut -c1-12)"
+        # The project's own agent home. An ephemeral launch does not use it,
+        # but its egress logs still go beside it (EGRESS_DIR below): they are
+        # the record of what the launch did, and outlive it on purpose.
+        PROJECT_HOME="$DATA_HOME/${dataDirName}/$WORK_BASENAME-$WORK_HASH"
+        if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+          # On disk, not in the runtime dir: an agent home holds caches that
+          # run to gigabytes. Named by the launch ID, like the instance dir,
+          # and holding what would otherwise be agent home's siblings — the
+          # CRI and store images — so that nothing of the launch outlives it
+          # but its egress logs. A container image cache kept across launches
+          # would carry state from one into the next.
+          _EPHEMERAL_ROOT="$DATA_HOME/${dataDirName}/.ephemeral"
+          mkdir -p "$_EPHEMERAL_ROOT"
+          chmod 700 "$_EPHEMERAL_ROOT"
+          # Each home is locked by its own directory, held — by this launcher
+          # and, inherited, by QEMU — for as long as the launch runs. Not by
+          # the instance lock: that is under XDG_RUNTIME_DIR, this under
+          # XDG_DATA_HOME, and two launches sharing one need not share the
+          # other. The dir is made under a name the sweep below ignores and
+          # locked before it is renamed into place, so no sweep ever sees it
+          # unlocked; the rename keeps the inode, and with it the lock.
+          mkdir -m 700 "$_EPHEMERAL_ROOT/$ID.new"
+          exec {_EPHEMERAL_LOCK_FD}<"$_EPHEMERAL_ROOT/$ID.new"
+          ${pkgs.util-linux}/bin/flock -n "$_EPHEMERAL_LOCK_FD"
+          mv -T "$_EPHEMERAL_ROOT/$ID.new" "$_EPHEMERAL_ROOT/$ID"
+          AGENT_TEMP="$_EPHEMERAL_ROOT/$ID"
+          # What a launcher killed outright left behind: a home whose lock can
+          # be taken. It is removed while holding that lock, so a launch still
+          # running is never touched. Symlinks are skipped and never followed
+          # (-P): should XDG_DATA_HOME sit inside a share, a guest could plant
+          # one here pointing anywhere.
+          # A <id>.new is one killed before its rename; it is taken only once
+          # it is ten minutes old, so a launch between its mkdir and its flock
+          # never loses it.
+          for _d in "$_EPHEMERAL_ROOT"/*; do
+            _n="$(basename "$_d")"
+            [[ "$_n" =~ ^[0-9a-f]{12}(\.new)?$ ]] && [ "''${_n%.new}" != "$ID" ] || continue
+            [ -d "$_d" ] && [ ! -L "$_d" ] || continue
+            if [[ "$_n" == *.new ]] && [ -z "$(find "$_d" -maxdepth 0 -mmin +10)" ]; then continue; fi
+            { exec {_fd}<"$_d"; } 2>/dev/null || continue
+            if ${pkgs.util-linux}/bin/flock -n "$_fd"; then
+              chmod -R -P u+w "$_d" 2>/dev/null || true
+              rm -rf "$_d"
+            fi
+            exec {_fd}<&-
+          done
+          AGENT_HOME="$AGENT_TEMP/home"
+        elif [ -z "''${AGENT_HOME:-}" ]; then
+          AGENT_HOME="$PROJECT_HOME"
         fi
         AGENT_DIR="$(realpath "$AGENT_HOME" 2>/dev/null || echo "$AGENT_HOME")"
         if [ ! -d "$AGENT_DIR" ]; then
@@ -462,13 +588,13 @@
         ${pkgs.jq}/bin/jq -n \
           --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
           --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg guest "$INSTANCE_GUEST" \
+          --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" --arg guest "$INSTANCE_GUEST" \
           --arg egressPolicy "$EGRESS_POLICY" \
           --arg qmp "$QMP_SOCK" --arg workSock "$SOCK" --arg agentHomeSock "$AGENT_SOCK" --arg guestSock "$GUEST_SOCK" \
           --arg scopeUnit "$_MICROVM_SCOPE" --arg slice "$SLICE" \
           --arg workUnit "$UNIT" --arg agentHomeUnit "$AGENT_UNIT" --arg guestUnit "$GUEST_UNIT" --arg egressUnit "$_EGRESS_UNIT_NAME" \
           '{version: 1, pid: $pid, flavor: $flavor, vmId: $vmId, id: $id, started: $started,
-            work: $work, agentHome: $agentHome, guest: $guest, guestMount: "/run/microvm",
+            work: $work, agentHome: $agentHome, agentHomeMode: $agentHomeMode, guest: $guest, guestMount: "/run/microvm",
             egressPolicy: $egressPolicy,
             sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
             slice: $slice,
@@ -496,8 +622,14 @@
           # Host-only sibling of the agent dir, like the CRI image: $AGENT_DIR
           # itself is exported into the guest, and the guest must not be able
           # to rewrite the record of its own traffic. Traffic metadata is
-          # sensitive, so the directory is owner-only.
-          EGRESS_DIR="$AGENT_DIR-egress"
+          # sensitive, so the directory is owner-only. An ephemeral agent home
+          # goes with its launch, so its egress logs go beside the project's
+          # own home instead, where every launch on the project keeps them.
+          if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+            EGRESS_DIR="$PROJECT_HOME-egress"
+          else
+            EGRESS_DIR="$AGENT_DIR-egress"
+          fi
           mkdir -p "$EGRESS_DIR"
           chmod 700 "$EGRESS_DIR"
           _EGRESS_STAMP="$(date +%Y%m%d-%H%M%S)-''${ID%%-*}"
@@ -532,10 +664,17 @@
             # can show where every rule comes from and what overrode it.
             _EGRESS_ALLOWLIST_FILE="$EGRESS_DIR/session-$_EGRESS_STAMP.allowlist"
             _EGRESS_RULES="$_EGRESS_ALLOWLIST_FILE.rules"
+            # tests/egress-builtin.nix extracts the region between these
+            # markers and runs it against the real proxy, so keep it
+            # self-contained on EGRESS_BUILTIN, EGRESS_ALLOWLIST, EGRESS_ALLOW,
+            # EGRESS_DENY, EGRESS_POLICY and the _EGRESS_* / _C_* variables.
+            # BEGIN egress-allowlist
             {
+              if [ "$EGRESS_BUILTIN" = 1 ]; then
               ${lib.concatMapStrings (s: ''
               ${pkgs.gawk}/bin/awk -v l=${lib.escapeShellArg s.label} '{ print l "\t" $0 }' ${s.file}
               '') egressAllowlistSources}
+              fi
               if [ -n "''${EGRESS_ALLOWLIST:-}" ]; then
                 if [ ! -f "$EGRESS_ALLOWLIST" ]; then
                   echo "error: EGRESS_ALLOWLIST=$EGRESS_ALLOWLIST is not a file" >&2
@@ -548,11 +687,12 @@
               fi
             } > "$_EGRESS_RULES.src"
             ${pkgs.gawk}/bin/awk -f ${./scripts/egress-rules.awk} \
-              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" \
+              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" -v builtin="$EGRESS_BUILTIN" -v endpoints=${lib.escapeShellArg egressEndpointHosts} \
               -v allowout="$_EGRESS_ALLOWLIST_FILE" -v contractout="$_EGRESS_RULES" \
               -v B="$_C_B" -v D="$_C_D" -v R="$_C_R" -v G="$_C_G" -v Y="$_C_Y" -v Z="$_C_0" \
               "$_EGRESS_RULES.src"
             rm -f "$_EGRESS_RULES.src"
+            # END egress-allowlist
           ;; esac
 
           if [ "$EGRESS_POLICY" = "alert" ]; then
@@ -1106,7 +1246,13 @@ EOF
           _cont "virtiofs cache: $WORK_CACHE"
         fi
         _row "agent home" "" "$(_tilde "$AGENT_DIR") → /home/agent"
-        _cont "persists across sessions"
+        if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+          _cont "this launch only: removed when it ends, CRI and store images with it"
+          _cont "egress logs kept in $(_tilde "$PROJECT_HOME")-egress"
+        else
+          _cont "persists across sessions"
+          _hint "AGENT_HOME_MODE=ephemeral starts from an empty one"
+        fi
         # The third share, and the one API keys arrive by: what this launch
         # hands the guest (see "Instance dir"). Listed as it actually is.
         _GUEST_HOLDS="env"
@@ -1439,6 +1585,10 @@ EOF
           runner = self.packages.${system}.claude;
           config = self.nixosConfigurations."claude-${system}".config;
         };
+        agent-home-ephemeral = import ./tests/agent-home-ephemeral.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
         seed-idempotence = import ./tests/seed-idempotence.nix {
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
@@ -1459,6 +1609,11 @@ EOF
         # run in microvm-policy's CI. This one stays: it tests the launcher's
         # config generation against the proxy it actually ships with.
         egress-config = import ./tests/egress-config.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+          egressProxy = self.packages.${system}.egress-proxy;
+        };
+        egress-builtin = import ./tests/egress-builtin.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
           egressProxy = self.packages.${system}.egress-proxy;

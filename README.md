@@ -330,6 +330,35 @@ AGENT_HOME=~/.my-agent-home make claude.run
 
 This mounts the host directory at `/home/agent` inside the guest via a second virtiofs share with the same unprivileged UID/GID mapping.
 
+To start from an empty agent home instead, and leave none behind, set
+`AGENT_HOME_MODE=ephemeral`:
+
+```sh
+AGENT_HOME_MODE=ephemeral make claude.run
+```
+
+The launch then gets one of its own,
+`$XDG_DATA_HOME/<agent>-microvm/.ephemeral/<id>/home` (the launch ID; on disk,
+since agent homes hold caches that run to gigabytes), and it is removed when
+the launch ends, together with what would otherwise sit beside the project's
+home: the CRI image and the store disk. Nothing the guest wrote there — shell
+rc files, agent settings and hooks, skills, a container image cache — reaches
+the next launch. The egress logs are the exception, on purpose: they go to the
+project's usual `<basename>-<hash>-egress`, the record of what each launch did.
+A launcher killed outright leaves its directory behind; the next ephemeral
+launch of the same flavor removes every one whose launch is no longer running.
+
+It cannot be combined with `AGENT_HOME` (the launch picks the directory), nor
+with `DIRENV_ALLOW=1`: the dev shell's guard against evaluating Nix files a
+guest rewrote remembers its last evaluation in agent home, and a fresh one
+would let every evaluation through unprompted. It also refuses a `WORK_DIR` that
+contains its own state (`$XDG_DATA_HOME/<agent>-microvm`, or `AGENT_HOME`'s
+parent), such as `WORK_DIR=$HOME` or `/`, and one that lies inside
+`$XDG_DATA_HOME/<agent>-microvm` (its `.ephemeral` directory, a launch's home):
+either way the guest could write the egress logs and other launches' homes. A persistent launch is only warned about that
+layout, which it always allowed. Signing in by OAuth leaves
+nothing to reuse either, so ephemeral homes go with an API key.
+
 ### Per-launch instance directory
 
 Each launch keeps what is its alone in one directory under the runtime dir:
@@ -637,6 +666,24 @@ subdomains — e.g. to keep Claude Code's optional telemetry from leaving the
 VM in shadow/enforce. The format has no deny rule, so a domain still covered by
 a broader entry (`api.anthropic.com` under `anthropic.com`) cannot be removed;
 the launcher warns instead of claiming it is blocked.
+Nor does a deny reach the agent's model endpoints under `shadow`/`enforce`:
+the proxy serves them under their own path grant, not as allowlist entries, so
+`EGRESS_DENY=anthropic.com` leaves `/v1/messages` working, and the contract
+and a warning say so.
+
+`EGRESS_BUILTIN=0` leaves the baked-in default out altogether, so the
+allowlist is only what `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` name — with
+neither, nothing. That is the setting for running code you do not trust
+under `enforce`: by default the guest can still reach GitHub, the package
+registries and the Nix cache. The agent keeps working: its model API is not an
+allowlist entry but a reverse-proxied endpoint with its own path grant, which
+this does not touch. What the agent loses is everything else it talks to
+(update checks, telemetry, plugin installs); with Claude Code,
+`EXTRA_ENV=CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps it from trying.
+The session contract says when the built-in lists are off. Under `alert`, which
+only watches and has no proxy, the model API is an ordinary destination: with
+the built-ins off, the agent's own API traffic alerts too unless
+`EGRESS_ALLOW` names its host.
 
 An entry matches itself and every subdomain. Alerts never block — a flagged
 domain is a line in a log and in the session-end report, nothing more.
@@ -795,6 +842,7 @@ Rebuild with `make claude`.
 |----------|-------------|---------|
 | `WORK_DIR` | Host directory to mount at `/work` | Current directory |
 | `AGENT_HOME` | Host directory for agent state (mounted at `/home/agent`) | `$XDG_DATA_HOME/<agent>-microvm/<hash>` |
+| `AGENT_HOME_MODE` | `persistent` (one agent home per project, kept) or `ephemeral` (a fresh one for the launch, removed with its CRI and store images when it ends; egress logs kept) — see [Home directory persistence](#home-directory-persistence) | `persistent` |
 | `WORK_CACHE` | virtiofsd cache policy for `/work`: `auto`, `always`, `never` or `metadata` — see [Work share caching](#work-share-caching) | `auto` |
 | `AGENT_SETTINGS` | Host path to a settings file seeded into the agent home before boot (flavor-specific destination, e.g. `.claude/settings.json`) — see [Pre-seeding agent settings](#pre-seeding-agent-settings) | (none) |
 | `VM_MEM` | VM memory in MB | `8192` |
@@ -814,6 +862,7 @@ Rebuild with `make claude`.
 | `EGRESS_POLICY` | `open` (unrestricted), `monitor` / `alert` (observe-only: record all guest traffic, `alert` adds live off-allowlist alerts), `shadow` / `enforce` (sealed netdev, all traffic through the host-side proxy; `shadow` audits what `enforce` would deny, `enforce` denies it and keeps API keys out of the guest). See [Egress policy](#egress-policy) | `open` |
 | `EGRESS_ALLOW` | Extra allowlist domains for `alert`/`shadow`/`enforce`, comma-separated. An entry matches itself and every subdomain; `host:port` grants a non-443 port | (none) |
 | `EGRESS_ALLOWLIST` | Path to an additional allowlist file (org or project policy), appended to the baked-in default for `alert`/`shadow`/`enforce` | (none) |
+| `EGRESS_BUILTIN` | `0` leaves the baked-in allowlists out for `alert`/`shadow`/`enforce`: only `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` apply, and the agent's model endpoints, which are no allowlist entry. See [Egress policy](#egress-policy) | `1` |
 | `EGRESS_DENY` | Allowlist domains to remove for `alert`/`shadow`/`enforce`, comma-separated: drops each entry that is a listed domain or below one, after all additions. Cannot narrow a broader entry (warns instead) | (none) |
 | `EGRESS_KEEP_PCAP` | Set to keep the raw capture after the summary is written; by default it is deleted and only the report persists | (unset) |
 | `EGRESS_PCAP_MAXLEN` | Captured bytes per packet in `monitor`/`alert` | `4096` |
@@ -936,7 +985,8 @@ and what you can do about each:
 | `$AGENT_HOME-store/nix-store-overlay.img` | per-run, ~69 MiB, deleted on exit along with its directory | build-time only: `claude-vm.store.diskBacked = false` |
 | `$XDG_RUNTIME_DIR/claude-microvm/vms/<id>/` (env file with API keys, CA certs, nix DB snapshot ~97 MiB; sockets) | per-run, on tmpfs, deleted on exit — or at logout/reboot if the launcher is killed | — |
 | `$XDG_RUNTIME_DIR/claude-microvm/` and its `vms/`, empty | on tmpfs, until logout/reboot | — |
-| `$AGENT_HOME` (agent state, dev-shell cache) | persistent | point `AGENT_HOME` somewhere disposable |
+| `$AGENT_HOME` (agent state, dev-shell cache) | persistent | `AGENT_HOME_MODE=ephemeral`: a fresh one per launch, removed with its CRI and store images on exit (or by the next ephemeral launch if the launcher is killed) |
+| `$AGENT_HOME-egress/` (egress logs, reports) | persistent, under `EGRESS_POLICY` other than `open`; also under `AGENT_HOME_MODE=ephemeral`, beside the project's home | delete it; `EGRESS_POLICY=open` writes none |
 
 The CRI disk used to be created on every launch whether or not `ENABLE_CRI` was
 set, and it is never deleted. It is now only created for a run that asks for
