@@ -114,7 +114,9 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   refused work-is-ephemeral "WORK_DIR=$EPH is inside $DATA" AGENT_HOME_MODE=ephemeral WORK_DIR=$EPH
   mkdir -p $EPH/ffffffffffff/home
   refused work-in-a-home "WORK_DIR=$EPH/ffffffffffff/home is inside $DATA" AGENT_HOME_MODE=ephemeral WORK_DIR=$EPH/ffffffffffff/home
-  launch inside-work-persistent WORK_DIR=$TMPDIR
+  # (Not WORK_DIR=$TMPDIR: that holds the runtime dir too, which is refused
+  # whatever the mode.)
+  launch inside-work-persistent WORK_DIR=$XDG_DATA_HOME
   if [ "$(cat $TMPDIR/inside-work-persistent/rc)" = 0 ] && grep -q "is inside WORK_DIR=.*the guest can write this launcher's state" $TMPDIR/inside-work-persistent/out; then
     ok "a persistent launch with its state inside the work share runs, and is warned"
   else bad "persistent launch inside WORK_DIR: rc $(cat $TMPDIR/inside-work-persistent/rc)"; cat $TMPDIR/inside-work-persistent/out >&2; fi

@@ -117,14 +117,50 @@
             fi'') flavorEndpoints;
           launcher = pkgs.writeShellScriptBin "microvm-run" ''
         set -euo pipefail
-        WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
-        # A launch record left at LAUNCH_RECORD by an earlier launch goes first,
-        # before anything here can refuse to start: a launch that never boots
-        # must not leave the last one's record standing for its own. Where the
-        # record may go is checked below ("Launch record").
-        if [ -n "''${LAUNCH_RECORD:-}" ] && [ -f "$LAUNCH_RECORD" ] && [ ! -L "$LAUNCH_RECORD" ]; then
-          rm -f "$LAUNCH_RECORD"
+        # --- Launch record (LAUNCH_RECORD): where it may go ---
+        # What this launch ran with, as JSON, for whatever drove it — written
+        # just before boot, completed at exit; see README "Launch record".
+        # Checked first of all, before anything else can refuse to start,
+        # because an earlier launch's record at the path is removed here: a
+        # launch that never boots must not leave the last one's standing for
+        # its own. And checked before that removal, so a path that is refused
+        # loses nothing. Paths are compared canonical (-m: nothing need exist
+        # yet), so a symlinked parent is followed to where the file would be.
+        #
+        # Evidence, so nowhere the guest can write — the work share, this
+        # launcher's state, agent home, a writable share — and in a directory
+        # only this user can write, so no one else can swap the file or plant
+        # one in its place.
+        _RECORD=""
+        if [ -n "''${LAUNCH_RECORD:-}" ]; then
+          _RECORD="$(realpath -m "$LAUNCH_RECORD")"
+          _GUEST_WRITES=("$(realpath -m "''${WORK_DIR:-$(pwd)}")" "$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")")
+          if [ -n "''${AGENT_HOME:-}" ]; then _GUEST_WRITES+=("$(realpath -m "$AGENT_HOME")"); fi
+          for _v in ${lib.concatMapStringsSep " " (s: s.var) (lib.filter (s: !s.readOnly) sharesList)}; do
+            if [ -n "''${!_v:-}" ]; then _GUEST_WRITES+=("$(realpath -m "''${!_v}")"); fi
+          done
+          for _g in "''${_GUEST_WRITES[@]}"; do
+            case "$_RECORD" in "''${_g%/}"/*)
+              echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is inside $_g, which the guest can write" >&2
+              exit 1 ;;
+            esac
+          done
+          _RECORD_DIR="$(dirname "$_RECORD")"
+          if [ ! -d "$_RECORD_DIR" ]; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $_RECORD_DIR is not a directory" >&2
+            exit 1
+          fi
+          if [ -z "$(find "$_RECORD_DIR" -maxdepth 0 -user "$(id -u)" ! -perm /022)" ]; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $_RECORD_DIR must be yours and writable by no one else" >&2
+            exit 1
+          fi
+          if [ -L "$LAUNCH_RECORD" ] || { [ -e "$_RECORD" ] && [ ! -f "$_RECORD" ]; }; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is not a regular file" >&2
+            exit 1
+          fi
+          rm -f "$_RECORD"
         fi
+        WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         # Derive project basename for host-visible identifiers
         WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
         [ -z "$WORK_BASENAME" ] && WORK_BASENAME="root"
@@ -311,6 +347,8 @@
         # for lying inside the work share: a project beside ~/.my-agent-home
         # is inside that parent ($HOME) and is no overlap.
         _DATA_DIR="$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")"
+        # Every launch's instance dir, its guest/env with API keys among them.
+        _RUNTIME_ROOT="$(realpath -m "$RUNTIME/claude-microvm")"
         _STATE_IN=("$_DATA_DIR")
         if [ -n "''${AGENT_HOME:-}" ]; then _STATE_IN+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
         # "" for WORK=/, so that "$_W"/* matches every absolute path.
@@ -327,6 +365,11 @@
           fi
           echo "warning: $_OVERLAP: the guest can write this launcher's state through the work share (agent homes, egress logs)" >&2
         fi
+        # The runtime root holds every running launch's env file, API keys and
+        # all: a work share overlapping it would hand them to this guest. Not
+        # one layout anyone relied on, so refused whatever the mode.
+        case "$_RUNTIME_ROOT/" in "$_W"/*) echo "error: WORK_DIR=$WORK contains $_RUNTIME_ROOT, where every launch keeps its env file and API keys" >&2; exit 1 ;; esac
+        case "$_W/" in "$_RUNTIME_ROOT"/*) echo "error: WORK_DIR=$WORK is inside $_RUNTIME_ROOT, where every launch keeps its env file and API keys" >&2; exit 1 ;; esac
         # --- Extra shares (claude-vm.shares) ---
         # The guest declares them, so QEMU expects each one's socket: each must
         # be given its host directory, SHARE_<NAME>, or the VM could not start.
@@ -338,6 +381,13 @@
         _SHARE_RO=${shareArray (s: if s.readOnly then "1" else "0")}
         _SHARE_MP=${shareArray (s: s.mountPoint)}
         _SHARE_HOST=()
+        # What a share may not lie inside: the data dir and the runtime root,
+        # and an explicit AGENT_HOME with the siblings beside it.
+        _STATE_INSIDE=("$_DATA_DIR" "$_RUNTIME_ROOT")
+        if [ -n "''${AGENT_HOME:-}" ]; then
+          _a="$(realpath -m "$AGENT_HOME")"
+          _STATE_INSIDE+=("$_a" "$_a-egress" "$_a-cri" "$_a-store")
+        fi
         for _i in "''${!_SHARE_NAMES[@]}"; do
           _v="''${_SHARE_VARS[$_i]}"
           _h="''${!_v:-}"
@@ -350,40 +400,14 @@
             exit 1
           fi
           _h="$(realpath "$_h")"
-          for _s in "''${_STATE_IN[@]}"; do
+          for _s in "''${_STATE_IN[@]}" "$_RUNTIME_ROOT"; do
             case "$_s/" in "''${_h%/}"/*) echo "error: $_v=$_h contains $_s, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
           done
-          case "''${_h%/}/" in "$_DATA_DIR"/*) echo "error: $_v=$_h is inside $_DATA_DIR, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          for _s in "''${_STATE_INSIDE[@]}"; do
+            case "''${_h%/}/" in "$_s"/*) echo "error: $_v=$_h is inside $_s, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          done
           _SHARE_HOST+=("$_h")
         done
-        # --- Launch record (LAUNCH_RECORD) ---
-        # What this launch actually ran with, as JSON, for whatever drove it —
-        # written just before boot, completed with its outcome at exit; see
-        # README "Launch record". Evidence, so nowhere the guest can write:
-        # not the work share, not this launcher's state, not a writable share.
-        # (An earlier launch's record was removed at the very start.)
-        _RECORD=""
-        if [ -n "''${LAUNCH_RECORD:-}" ]; then
-          _RECORD="$(realpath -m "$LAUNCH_RECORD")"
-          if [ ! -d "$(dirname "$_RECORD")" ]; then
-            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $(dirname "$_RECORD") is not a directory" >&2
-            exit 1
-          fi
-          if [ -L "$LAUNCH_RECORD" ] || { [ -e "$_RECORD" ] && [ ! -f "$_RECORD" ]; }; then
-            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is not a regular file" >&2
-            exit 1
-          fi
-          _GUEST_WRITES=("$_W" "$_DATA_DIR")
-          for _i in "''${!_SHARE_NAMES[@]}"; do
-            [ "''${_SHARE_RO[$_i]}" = 1 ] || _GUEST_WRITES+=("''${_SHARE_HOST[$_i]%/}")
-          done
-          for _g in "''${_GUEST_WRITES[@]}"; do
-            case "$_RECORD" in "$_g"/*)
-              echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is inside $_g, which the guest can write" >&2
-              exit 1 ;;
-            esac
-          done
-        fi
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -1492,15 +1516,19 @@ EOF
         fi
 
         # The launch record, as of boot. Names only, never values, as in the
-        # contract. Written whole (a new file renamed into place) and owner-only.
+        # contract. Written whole: a file of its own, made owner-only and new
+        # by mktemp (never one that was there before), renamed into place.
         _record_write () { # json
-          printf '%s\n' "$1" > "$_RECORD.new"
-          chmod 600 "$_RECORD.new"
-          mv -f "$_RECORD.new" "$_RECORD"
+          local tmp
+          tmp="$(mktemp "$_RECORD.XXXXXX")"
+          printf '%s\n' "$1" > "$tmp"
+          mv -f "$tmp" "$_RECORD"
         }
         _RECORD_JSON=""
         if [ -n "$_RECORD" ]; then
-          _words () { ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args $1; }
+          # Split on spaces only: set -f, in a subshell of its own, keeps a deny
+          # such as *.example.org from matching files.
+          _words () ( set -f; ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args $1 )
           _DENY_WORDS="''${EGRESS_DENY:-}"; _DENY_WORDS="''${_DENY_WORDS//,/ }"
           _ALLOW_SHA=""
           if [ -n "$_EGRESS_ALLOWLIST_FILE" ] && [ -f "$_EGRESS_ALLOWLIST_FILE" ]; then

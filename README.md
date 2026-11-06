@@ -219,7 +219,10 @@ SHARE_SKILL=~/skills/pinned SHARE_AUDIT_OUT=~/audits/project ./result/bin/microv
   root in the guest, and is mounted `ro`.
 - None may overlap the launcher's own state, in either direction, read-only
   or not: `$XDG_DATA_HOME/<agent>-microvm` holds every project's agent home
-  and the egress logs.
+  and the egress logs, `$XDG_RUNTIME_DIR/claude-microvm` every running
+  launch's env file with its API keys, and an explicit `AGENT_HOME` has its
+  `-egress`, `-cri` and `-store` siblings.
+- No two shares may use the same mount point.
 - Names are 1-16 of `a-z`, `0-9` and `-`; a mount point must stay clear of
   `/work`, `/home/agent`, `/run/microvm`, `/nix` and the system's own
   directories.
@@ -397,7 +400,9 @@ contains its own state (`$XDG_DATA_HOME/<agent>-microvm`, or `AGENT_HOME`'s
 parent), such as `WORK_DIR=$HOME` or `/`, and one that lies inside
 `$XDG_DATA_HOME/<agent>-microvm` (its `.ephemeral` directory, a launch's home):
 either way the guest could write the egress logs and other launches' homes. A persistent launch is only warned about that
-layout, which it always allowed. Signing in by OAuth leaves
+layout, which it always allowed. A `WORK_DIR` that contains or lies inside
+`$XDG_RUNTIME_DIR/claude-microvm`, where every running launch keeps its env file
+and API keys, is refused in either mode. Signing in by OAuth leaves
 nothing to reuse either, so ephemeral homes go with an API key.
 
 ### Per-launch instance directory
@@ -540,9 +545,13 @@ It is written just before the VM boots and completed when the launch ends:
 A record whose `ended` is still `null` after the launcher has gone is one whose
 launcher was killed. A record already at the path is removed when the launcher
 starts, so a launch that is refused before boot leaves none, rather than the
-previous run's. The file is owner-only, replaced whole on each write, and may
-not be anywhere the guest can write: inside `WORK_DIR`, this launcher's state
-(`$XDG_DATA_HOME/<agent>-microvm`), or a writable share.
+previous run's. The file is owner-only and replaced whole on each write, from a
+fresh file of its own. It may not be anywhere the guest can write — inside
+`WORK_DIR`, this launcher's state (`$XDG_DATA_HOME/<agent>-microvm`),
+`AGENT_HOME`, or a writable share; a symlinked parent is followed to where the
+file would really be — and its directory must be yours and writable by no one
+else (so not `/tmp`). Those checks come before anything is removed: a path that
+is refused keeps whatever file it held.
 
 ### Launch scope
 

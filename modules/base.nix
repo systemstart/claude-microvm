@@ -302,7 +302,13 @@ in
           && !(lib.elem s.mountPoint [ "/" "/run" "/etc" "/var" "/usr" "/tmp" ]);
         message = "claude-vm.shares.${name}: mountPoint '${s.mountPoint}' must be an absolute path clear of /work, /home/agent, ${instance.dir}, /nix and the system's own directories";
       }
-    ]) config.claude-vm.shares);
+    ]) config.claude-vm.shares)
+    # One fileSystems entry per mount point: of two shares on one, only the
+    # later would be mounted.
+    ++ (let mps = lib.mapAttrsToList (_: s: s.mountPoint) config.claude-vm.shares; in [ {
+      assertion = lib.length mps == lib.length (lib.unique mps);
+      message = "claude-vm.shares: two shares cannot have the same mountPoint (${lib.concatStringsSep ", " (lib.filter (m: lib.count (x: x == m) mps > 1) (lib.unique mps))})";
+    } ]);
 
     users.groups.agent.gid = 1000;
     users.users.agent = {

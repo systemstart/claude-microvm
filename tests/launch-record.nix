@@ -76,6 +76,16 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
   launch refused LAUNCH_RECORD=$R AGENT_HOME_MODE=bogus
   [ "$(cat $TMPDIR/refused/rc)" != 0 ] && [ ! -e $R ] \
     && ok "a launch refused before boot leaves no record, not even the earlier one" || bad "refused launch left: $(cat $R 2>/dev/null)"
+  echo stale > $R
+  launch nowork LAUNCH_RECORD=$R WORK_DIR=$TMPDIR/missing/proj
+  [ "$(cat $TMPDIR/nowork/rc)" != 0 ] && [ ! -e $R ] \
+    && ok "...and so does one whose WORK_DIR cannot be resolved" || bad "unresolvable WORK_DIR left: $(cat $R 2>/dev/null)"
+  # A deny with a wildcard is recorded as given, never as files it matches.
+  touch $TMPDIR/cwd/a.example.org
+  launch glob LAUNCH_RECORD=$R EGRESS_DENY='*.example.org' HOLD=$TMPDIR/release
+  rm -f $TMPDIR/cwd/a.example.org
+  [ "$(jq -c .egress.deny $R)" = '["*.example.org"]' ] && ok "a wildcard deny is recorded as given" || bad "deny recorded as $(jq -c .egress.deny $R)"
+  [ -z "$(find $TMPDIR/records -maxdepth 1 -name 'run.json.*')" ] && ok "no temporary record file is left behind" || bad "left: $(ls $TMPDIR/records)"
   launch killed LAUNCH_RECORD=$R HOLD=$TMPDIR/never &
   for _ in $(seq 1 300); do [ -e $TMPDIR/killed/started ] && break; sleep 0.1; done
   [ -e $TMPDIR/killed/started ] || { bad "the launch to kill did not start"; tail -5 $TMPDIR/killed/out >&2; }
@@ -92,7 +102,14 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
       ok "refused before any daemon: $*"
     else bad "not refused as expected: $* (rc $(cat $TMPDIR/$n/rc))"; cat $TMPDIR/$n/out >&2; fi
   }
+  echo keep > $TMPDIR/proj/run.json
   refused in-work "is inside $TMPDIR/proj, which the guest can write" LAUNCH_RECORD=$TMPDIR/proj/run.json
+  [ "$(cat $TMPDIR/proj/run.json)" = keep ] && ok "...and the file at the refused path is left alone" || bad "a refused path's file was removed"
+  ln -sfn $TMPDIR/proj $TMPDIR/records/via
+  refused via-link "is inside $TMPDIR/proj, which the guest can write" LAUNCH_RECORD=$TMPDIR/records/via/run.json
+  [ "$(cat $TMPDIR/proj/run.json)" = keep ] && ok "...also through a symlinked parent, and it is left alone" || bad "the file behind a symlinked parent was removed"
+  mkdir -p $TMPDIR/shared; chmod 777 $TMPDIR/shared
+  refused others-write "must be yours and writable by no one else" LAUNCH_RECORD=$TMPDIR/shared/run.json
   refused in-state "is inside $XDG_DATA_HOME/claude-microvm, which the guest can write" LAUNCH_RECORD=$XDG_DATA_HOME/claude-microvm/run.json
   mkdir -p $TMPDIR/records/adir; ln -sf $TMPDIR/elsewhere $TMPDIR/records/link
   refused a-dir "is not a regular file" LAUNCH_RECORD=$TMPDIR/records/adir

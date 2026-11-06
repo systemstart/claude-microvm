@@ -49,6 +49,10 @@ let
         && refusedAt { claude-vm.shares.a.mountPoint = "/home"; }
         && refusedAt { claude-vm.shares.a.mountPoint = "/run/microvm"; };
     }
+    {
+      name = "two shares on one mount point are refused";
+      ok = refusedAt { claude-vm.shares = { a.mountPoint = "/data"; b.mountPoint = "/data"; }; };
+    }
   ];
 
   harness = import ./lib/stubbed-launcher.nix { inherit pkgs runner; };
@@ -82,6 +86,14 @@ pkgs.runCommand "extra-shares" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite pk
   mkdir -p $XDG_DATA_HOME/claude-microvm/sub
   refused in-state "is inside $XDG_DATA_HOME/claude-microvm, this launcher's state" SHARE_AUDIT_OUT=$XDG_DATA_HOME/claude-microvm/sub SHARE_SKILL=$TMPDIR/skill
   refused over-state "contains $XDG_DATA_HOME/claude-microvm, this launcher's state" SHARE_AUDIT_OUT=$TMPDIR/out SHARE_SKILL=$TMPDIR
+  # The runtime root holds every launch's env file with its API keys: no share
+  # may contain it or lie in it, read-only or not.
+  mkdir -p $XDG_RUNTIME_DIR/claude-microvm/vms
+  refused over-runtime "contains $XDG_RUNTIME_DIR/claude-microvm" SHARE_AUDIT_OUT=$TMPDIR/out SHARE_SKILL=$XDG_RUNTIME_DIR
+  refused in-runtime "is inside $XDG_RUNTIME_DIR/claude-microvm" SHARE_AUDIT_OUT=$TMPDIR/out SHARE_SKILL=$XDG_RUNTIME_DIR/claude-microvm/vms
+  # An explicit AGENT_HOME's egress logs, beside it.
+  mkdir -p $TMPDIR/ah $TMPDIR/ah-egress
+  refused in-egress "is inside $TMPDIR/ah-egress" AGENT_HOME=$TMPDIR/ah SHARE_AUDIT_OUT=$TMPDIR/out SHARE_SKILL=$TMPDIR/ah-egress
 
   launch ok SHARE_AUDIT_OUT=$TMPDIR/out SHARE_SKILL=$TMPDIR/skill
   L=$TMPDIR/ok; J=$L/instance.json; ID=$(jq -r .id $J 2>/dev/null || true)
