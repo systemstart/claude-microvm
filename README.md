@@ -145,6 +145,47 @@ Add as a dependency in another project's `flake.nix`:
 
 Then `nix develop` gives you `microvm-run` in the shell.
 
+### Building on claude-microvm
+
+A flake that needs a different guest — extra packages, its own NixOS
+settings — builds it from a flavor rather than forking this repo:
+
+```nix
+{
+  inputs.claude-vm.url = "github:systemstart/claude-microvm";
+
+  outputs = { claude-vm, ... }:
+    let system = "x86_64-linux"; in {
+      packages.${system}.default = claude-vm.lib.mkRunner {
+        inherit system;
+        flavor = "claude";                    # one of claude-vm.lib.flavors
+        modules = [
+          ({ pkgs, ... }: {
+            environment.systemPackages = [ pkgs.nodejs ];
+            claude-vm.agent.mem = 12288;      # also the launcher's VM_MEM default
+          })
+        ];
+      };
+    };
+}
+```
+
+| | |
+|---|---|
+| `lib.mkRunner { system, flavor ? "claude", modules ? [ ], nixosConfig ? … }` | The flavor's launcher, `microvm-run` with `microvm-stop` beside it, for the flavor's guest plus `modules`. The guest is on it as `.nixosConfig`. Without `modules` it is exactly `packages.<system>.<flavor>`. |
+| `lib.mkNixosConfig { system, flavor ? "claude", modules ? [ ] }` | Only the guest, a `nixosSystem`; pass it to `mkRunner` as `nixosConfig` to build its launcher. |
+| `lib.flavors` | The flavor names. |
+
+`modules` come after everything this flake sets, so they can extend or
+override any of it; the options meant for that are `claude-vm.*`
+(`modules/base.nix`, `modules/cri.nix`) and `microvmPolicy.*`
+(microvm-policy). The launcher takes its memory, vCPU and disk defaults from
+the guest, so setting them there sets both. The agent name
+(`claude-vm.agent.name`) must stay the flavor's: the launcher and the guest's
+shares are wired by it, and `mkRunner` refuses a guest that renamed it.
+Everything the launcher reads from the environment works as for the packaged
+flavors.
+
 ## Binary caches
 
 microvm.nix builds QEMU as `qemu_kvm.override { nixosTestRunner = true; }` (its

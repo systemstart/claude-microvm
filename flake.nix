@@ -1259,29 +1259,88 @@ EOF
           name = "microvm-run";
           paths = [ launcher (mkMicrovmStop pkgs) ];
           meta.mainProgram = "microvm-run";
+          # The script itself, for tests that read its text at eval time.
+          passthru = { inherit launcher; };
         };
+
+      # The guest every flavor is built from, before its agent module.
+      guestModules = [
+        microvm.nixosModules.microvm
+        ./modules/base.nix
+        ./modules/cri.nix
+        microvm-policy.nixosModules.default
+        # Its other defaults match this repo's layout; its state file is
+        # the launcher's env file, on the read-only instance share.
+        ({ config, ... }: {
+          microvmPolicy.stateFile = "${config.claude-vm.instance.dir}/env";
+          microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
+        })
+        { claude-vm.cri.enable = true; }
+      ];
+
+      flavorOf = flavor:
+        vmFlavors.${flavor} or (throw "claude-microvm: unknown flavor '${flavor}' (one of: ${lib.concatStringsSep ", " (lib.attrNames vmFlavors)})");
+
+      # One flavor's guest; `modules` come last, so they can extend or
+      # override anything before them. Public as lib.mkNixosConfig.
+      mkNixosConfig = { system, flavor ? "claude", modules ? [ ] }:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = guestModules ++ [ (flavorOf flavor).agentModule ] ++ modules;
+        };
+
+      # One flavor's launcher (microvm-run, with microvm-stop beside it) for
+      # a guest from mkNixosConfig; the guest is on it as `nixosConfig`.
+      # Public as lib.mkRunner. The launcher reads its defaults (memory,
+      # vCPUs, disk sizes) from the guest, so a module that sets
+      # claude-vm.agent.mem changes the launcher's VM_MEM default too.
+      mkRunner = { system, flavor ? "claude", modules ? [ ], nixosConfig ? mkNixosConfig { inherit system flavor modules; } }:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          policyPkgs = microvm-policy.packages.${system};
+          fl = flavorOf flavor;
+          nixosCfg = nixosConfig.config;
+          runner = nixosCfg.microvm.runner.qemu;
+        in
+        # The launcher's sed surgery and the guest's share sources both key
+        # on "<agent name>-vm"; a module that renamed the agent would leave
+        # QEMU pointing at sockets nothing serves.
+        assert lib.assertMsg (nixosCfg.claude-vm.agent.name == flavor)
+          "claude-microvm mkRunner: claude-vm.agent.name is '${nixosCfg.claude-vm.agent.name}', but the flavor is '${flavor}'; the agent name must stay the flavor's";
+        mkRunnerScript {
+          inherit pkgs runner;
+          egressReport = policyPkgs.egress-report;
+          egressProxy = policyPkgs.egress-proxy;
+          flavorEndpoints = egressEndpoints.${flavor};
+          inherit (fl) dataDirName apiKeyVars settingsFile;
+          agentName = flavor;
+          defaultMem = nixosCfg.claude-vm.agent.mem;
+          defaultVcpu = nixosCfg.claude-vm.agent.vcpu;
+          defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
+          storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
+          defaultStoreSize = nixosCfg.claude-vm.store.size;
+          # The session allowlist is assembled from these at launch, each line
+          # tagged with its label so the session contract can show its source.
+          egressAllowlistSources =
+            [ { label = "built-in · common.txt (microvm-policy)"; file = "${microvm-policy}/allowlists/common.txt"; } ]
+            ++ map (f: { label = "built-in · ${baseNameOf f}"; file = f; }) fl.egressAllowlists;
+        } // { inherit nixosConfig; };
     in
     {
+      # For flakes that build their own VM on this one: a flavor's guest
+      # plus their modules, and its launcher. The interface is these two
+      # functions, the flavor names, and the claude-vm.* / microvmPolicy.*
+      # options their modules may set — see README "Building on
+      # claude-microvm".
+      lib = {
+        inherit mkNixosConfig mkRunner;
+        flavors = lib.attrNames vmFlavors;
+      };
+
       nixosConfigurations = builtins.listToAttrs (lib.flatten (map (system:
         lib.mapAttrsToList (name: flavor: {
           name = "${name}${flavor.suffix}-${system}";
-          value = nixpkgs.lib.nixosSystem {
-            inherit system;
-            modules = [
-              microvm.nixosModules.microvm
-              ./modules/base.nix
-              ./modules/cri.nix
-              microvm-policy.nixosModules.default
-              # Its other defaults match this repo's layout; its state file is
-              # the launcher's env file, on the read-only instance share.
-              ({ config, ... }: {
-                microvmPolicy.stateFile = "${config.claude-vm.instance.dir}/env";
-                microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
-              })
-              { claude-vm.cri.enable = true; }
-              flavor.agentModule
-            ];
-          };
+          value = mkNixosConfig { inherit system; flavor = name; };
         }) vmFlavors
       ) linuxSystems));
 
@@ -1336,26 +1395,10 @@ EOF
           # whatever drives launches from outside (`nix run .#microvm-stop`).
           microvm-stop = mkMicrovmStop pkgs;
         } //
-        builtins.mapAttrs (name: flavor: let
-          nixosCfg = self.nixosConfigurations."${name}${flavor.suffix}-${system}".config;
-          runner = nixosCfg.microvm.runner.qemu;
-        in mkRunnerScript {
-          inherit pkgs runner;
-          egressReport = policyPkgs.egress-report;
-          egressProxy = policyPkgs.egress-proxy;
-          flavorEndpoints = egressEndpoints.${name};
-          inherit (flavor) dataDirName apiKeyVars settingsFile;
-          agentName = name;
-          defaultMem = nixosCfg.claude-vm.agent.mem;
-          defaultVcpu = nixosCfg.claude-vm.agent.vcpu;
-          defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
-          storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
-          defaultStoreSize = nixosCfg.claude-vm.store.size;
-          # The session allowlist is assembled from these at launch, each line
-          # tagged with its label so the session contract can show its source.
-          egressAllowlistSources =
-            [ { label = "built-in · common.txt (microvm-policy)"; file = "${microvm-policy}/allowlists/common.txt"; } ]
-            ++ map (f: { label = "built-in · ${baseNameOf f}"; file = f; }) flavor.egressAllowlists;
+        builtins.mapAttrs (name: flavor: mkRunner {
+          inherit system;
+          flavor = name;
+          nixosConfig = self.nixosConfigurations."${name}${flavor.suffix}-${system}";
         }) vmFlavors
       );
 
@@ -1366,6 +1409,11 @@ EOF
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        downstream-api = import ./tests/downstream-api.nix {
+          inherit pkgs lib;
+          inherit (self.lib) flavors mkRunner;
+          package = self.packages.${system}.claude;
+        };
         store-overlay-disk = import ./tests/store-overlay-disk.nix {
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
