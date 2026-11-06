@@ -4,6 +4,8 @@
 #
 #   -v deny=LIST       EGRESS_DENY, comma/space separated
 #   -v mode=MODE       EGRESS_POLICY (alert|shadow|enforce)
+#   -v builtin=0|1     EGRESS_BUILTIN; 0 says in the contract that the
+#                      built-in lists were left out (the input has none)
 #   -v allowout=FILE   the allowlist the proxy, alert matcher and report read:
 #                      every raw line except the entries EGRESS_DENY removes
 #   -v contractout=FILE  the rules block for the session contract
@@ -99,6 +101,8 @@ END {
     s = ""; for (j = 1; j <= n; j++) { split(es[j], em, "|"); s = s " " em[2] em[1] }
     out = out paint(wrap(s, ind))
   }
+  if (builtin == "0")
+    out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above, and the agent's model endpoints" Z "\n"
   if (mode == "enforce") last = R "deny " Z " " B "everything else" Z D ", and any port an entry does not grant" Z
   else if (mode == "shadow") last = Y "log  " Z " " B "everything else" Z D " as would_deny — nothing is blocked yet" Z
   else last = Y "alert" Z " " B "on everything else" Z D " — nothing is blocked" Z

@@ -216,6 +216,23 @@
               echo "warning: EGRESS_ALLOW / EGRESS_ALLOWLIST / EGRESS_DENY are only read by EGRESS_POLICY=alert|shadow|enforce — ignored" >&2
             fi ;;
         esac
+        # EGRESS_BUILTIN=0 drops the built-in allowlists (microvm-policy's
+        # common.txt and the flavor's own), leaving only EGRESS_ALLOWLIST and
+        # EGRESS_ALLOW. The agent's model endpoints are on no allowlist — the
+        # proxy reverse-proxies them under their own path grant — so they stay
+        # reachable.
+        EGRESS_BUILTIN="''${EGRESS_BUILTIN:-1}"
+        case "$EGRESS_BUILTIN" in
+          0|1) ;;
+          *)
+            echo "error: EGRESS_BUILTIN must be 1 (the built-in allowlists apply) or 0 (only EGRESS_ALLOWLIST and EGRESS_ALLOW) (got '$EGRESS_BUILTIN')" >&2
+            exit 1 ;;
+        esac
+        if [ "$EGRESS_BUILTIN" = 0 ]; then
+          case "$EGRESS_POLICY" in
+            open|monitor) echo "warning: EGRESS_BUILTIN is only read by EGRESS_POLICY=alert|shadow|enforce — ignored" >&2 ;;
+          esac
+        fi
         if ! [[ "''${EGRESS_PCAP_MAXLEN:-4096}" =~ ^[0-9]+$ ]]; then
           echo "error: EGRESS_PCAP_MAXLEN must be an integer (captured bytes per packet)" >&2
           exit 1
@@ -532,10 +549,17 @@
             # can show where every rule comes from and what overrode it.
             _EGRESS_ALLOWLIST_FILE="$EGRESS_DIR/session-$_EGRESS_STAMP.allowlist"
             _EGRESS_RULES="$_EGRESS_ALLOWLIST_FILE.rules"
+            # tests/egress-builtin.nix extracts the region between these
+            # markers and runs it against the real proxy, so keep it
+            # self-contained on EGRESS_BUILTIN, EGRESS_ALLOWLIST, EGRESS_ALLOW,
+            # EGRESS_DENY, EGRESS_POLICY and the _EGRESS_* / _C_* variables.
+            # BEGIN egress-allowlist
             {
+              if [ "$EGRESS_BUILTIN" = 1 ]; then
               ${lib.concatMapStrings (s: ''
               ${pkgs.gawk}/bin/awk -v l=${lib.escapeShellArg s.label} '{ print l "\t" $0 }' ${s.file}
               '') egressAllowlistSources}
+              fi
               if [ -n "''${EGRESS_ALLOWLIST:-}" ]; then
                 if [ ! -f "$EGRESS_ALLOWLIST" ]; then
                   echo "error: EGRESS_ALLOWLIST=$EGRESS_ALLOWLIST is not a file" >&2
@@ -548,11 +572,12 @@
               fi
             } > "$_EGRESS_RULES.src"
             ${pkgs.gawk}/bin/awk -f ${./scripts/egress-rules.awk} \
-              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" \
+              -v deny="''${EGRESS_DENY:-}" -v mode="$EGRESS_POLICY" -v builtin="$EGRESS_BUILTIN" \
               -v allowout="$_EGRESS_ALLOWLIST_FILE" -v contractout="$_EGRESS_RULES" \
               -v B="$_C_B" -v D="$_C_D" -v R="$_C_R" -v G="$_C_G" -v Y="$_C_Y" -v Z="$_C_0" \
               "$_EGRESS_RULES.src"
             rm -f "$_EGRESS_RULES.src"
+            # END egress-allowlist
           ;; esac
 
           if [ "$EGRESS_POLICY" = "alert" ]; then
@@ -1459,6 +1484,11 @@ EOF
         # run in microvm-policy's CI. This one stays: it tests the launcher's
         # config generation against the proxy it actually ships with.
         egress-config = import ./tests/egress-config.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+          egressProxy = self.packages.${system}.egress-proxy;
+        };
+        egress-builtin = import ./tests/egress-builtin.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
           egressProxy = self.packages.${system}.egress-proxy;

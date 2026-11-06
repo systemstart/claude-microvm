@@ -638,6 +638,17 @@ VM in shadow/enforce. The format has no deny rule, so a domain still covered by
 a broader entry (`api.anthropic.com` under `anthropic.com`) cannot be removed;
 the launcher warns instead of claiming it is blocked.
 
+`EGRESS_BUILTIN=0` leaves the baked-in default out altogether, so the
+allowlist is only what `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` name — with
+neither, nothing. That is the setting for running code you do not trust
+under `enforce`: by default the guest can still reach GitHub, the package
+registries and the Nix cache. The agent keeps working: its model API is not an
+allowlist entry but a reverse-proxied endpoint with its own path grant, which
+this does not touch. What the agent loses is everything else it talks to
+(update checks, telemetry, plugin installs); with Claude Code,
+`EXTRA_ENV=CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps it from trying.
+The session contract says when the built-in lists are off.
+
 An entry matches itself and every subdomain. Alerts never block — a flagged
 domain is a line in a log and in the session-end report, nothing more.
 
@@ -814,6 +825,7 @@ Rebuild with `make claude`.
 | `EGRESS_POLICY` | `open` (unrestricted), `monitor` / `alert` (observe-only: record all guest traffic, `alert` adds live off-allowlist alerts), `shadow` / `enforce` (sealed netdev, all traffic through the host-side proxy; `shadow` audits what `enforce` would deny, `enforce` denies it and keeps API keys out of the guest). See [Egress policy](#egress-policy) | `open` |
 | `EGRESS_ALLOW` | Extra allowlist domains for `alert`/`shadow`/`enforce`, comma-separated. An entry matches itself and every subdomain; `host:port` grants a non-443 port | (none) |
 | `EGRESS_ALLOWLIST` | Path to an additional allowlist file (org or project policy), appended to the baked-in default for `alert`/`shadow`/`enforce` | (none) |
+| `EGRESS_BUILTIN` | `0` leaves the baked-in allowlists out for `alert`/`shadow`/`enforce`: only `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` apply, and the agent's model endpoints, which are no allowlist entry. See [Egress policy](#egress-policy) | `1` |
 | `EGRESS_DENY` | Allowlist domains to remove for `alert`/`shadow`/`enforce`, comma-separated: drops each entry that is a listed domain or below one, after all additions. Cannot narrow a broader entry (warns instead) | (none) |
 | `EGRESS_KEEP_PCAP` | Set to keep the raw capture after the summary is written; by default it is deleted and only the report persists | (unset) |
 | `EGRESS_PCAP_MAXLEN` | Captured bytes per packet in `monitor`/`alert` | `4096` |
