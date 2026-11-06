@@ -272,6 +272,24 @@
             echo "error: AGENT_HOME_MODE must be persistent or ephemeral (got '$AGENT_HOME_MODE')" >&2
             exit 1 ;;
         esac
+        # The launcher's own host state — agent homes, the ephemeral ones and
+        # their sweep, the egress logs beside them — must not lie inside the
+        # work share, or the guest can write it: rewrite the record of its own
+        # traffic, plant files in the next launch's home, or swap the paths
+        # the sweep is about to remove. An ephemeral launch refuses that; a
+        # persistent one, which always ran like this, is warned.
+        _STATE_DIRS=("$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")")
+        if [ -n "''${AGENT_HOME:-}" ]; then _STATE_DIRS+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
+        for _s in "''${_STATE_DIRS[@]}"; do
+          case "$_s/" in
+            "$WORK"/*)
+              if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+                echo "error: $_s is inside WORK_DIR=$WORK, which the guest can write; AGENT_HOME_MODE=ephemeral needs its state out of the guest's reach — use a WORK_DIR that does not contain it" >&2
+                exit 1
+              fi
+              echo "warning: $_s is inside WORK_DIR=$WORK: the guest can write this launcher's state there (agent homes, egress logs)" >&2 ;;
+          esac
+        done
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -524,10 +542,14 @@
           # running is never touched. Symlinks are skipped and never followed
           # (-P): should XDG_DATA_HOME sit inside a share, a guest could plant
           # one here pointing anywhere.
+          # A <id>.new is one killed before its rename; it is taken only once
+          # it is ten minutes old, so a launch between its mkdir and its flock
+          # never loses it.
           for _d in "$_EPHEMERAL_ROOT"/*; do
             _n="$(basename "$_d")"
-            [[ "$_n" =~ ^[0-9a-f]{12}$ ]] && [ "$_n" != "$ID" ] || continue
+            [[ "$_n" =~ ^[0-9a-f]{12}(\.new)?$ ]] && [ "''${_n%.new}" != "$ID" ] || continue
             [ -d "$_d" ] && [ ! -L "$_d" ] || continue
+            if [[ "$_n" == *.new ]] && [ -z "$(find "$_d" -maxdepth 0 -mmin +10)" ]; then continue; fi
             { exec {_fd}<"$_d"; } 2>/dev/null || continue
             if ${pkgs.util-linux}/bin/flock -n "$_fd"; then
               chmod -R -P u+w "$_d" 2>/dev/null || true

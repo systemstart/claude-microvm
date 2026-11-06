@@ -50,8 +50,12 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   if grep -q 'built-in lists.*EGRESS_BUILTIN=0' rules.txt; then ok "the contract says the built-in lists are off"; else bad "the contract does not say so:"; cat rules.txt >&2; fi
 
   POLICY=alert assemble 0 ""
-  if grep -q "agent's own API traffic alerts too" rules.txt; then ok "under alert the contract says the agent's API traffic alerts too"
+  if grep -q "agent's own API traffic to api.anthropic.com alerts too" rules.txt; then ok "under alert the contract says the agent's API traffic alerts too"
   else bad "alert-mode contract does not say the API host alerts:"; cat rules.txt >&2; fi
+  POLICY=alert assemble 0 "api.anthropic.com"
+  if hosts | grep -qx api.anthropic.com && grep -q "which covers the agent's API host" rules.txt && ! grep -q "alerts too" rules.txt; then
+    ok "under alert, an EGRESS_ALLOW for the API host is in the allowlist, and the contract no longer says it alerts"
+  else bad "alert with EGRESS_ALLOW=api.anthropic.com:"; cat rules.txt >&2; fi
 
   # A deny that covers the model endpoint's host cannot block it: the proxy
   # serves it under its path grant, and the contract must not suggest otherwise.

@@ -46,6 +46,10 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   # A symlink under a launch-ID name, to a tree the sweep must not touch.
   mkdir -p $TMPDIR/victim/sub; chmod 555 $TMPDIR/victim/sub
   ln -s $TMPDIR/victim $EPH/cccccccccccc
+  # Killed between mkdir and rename: an old .new goes, a fresh one may be a
+  # launch about to lock it.
+  mkdir -p $EPH/dddddddddddd.new $EPH/eeeeeeeeeeee.new
+  touch -d "20 minutes ago" $EPH/dddddddddddd.new
 
   # --- one ephemeral launch ---------------------------------------------------------
   HOLD=$TMPDIR/release
@@ -64,6 +68,9 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   [ ! -e $EPH/aaaaaaaaaaaa ] && ok "a dead launch's dir is swept, read-only contents and all" || bad "dead launch's dir was not swept"
   [ -d $EPH/bbbbbbbbbbbb ] && ok "a live launch's dir is left alone" || bad "a live launch's dir was swept"
   [ -d $EPH/keep-me ] && ok "a dir that is not named by a launch ID is left alone" || bad "keep-me was swept"
+  [ ! -e $EPH/dddddddddddd.new ] && [ -d $EPH/eeeeeeeeeeee.new ] \
+    && ok "an abandoned <id>.new is swept once it is ten minutes old, a fresh one is not" \
+    || bad ".new sweep: $(ls -A $EPH)"
   [ -L $EPH/cccccccccccc ] && [ "$(stat -c %a $TMPDIR/victim/sub)" = 555 ] \
     && ok "a symlink is neither followed nor removed" || bad "the sweep followed or removed a symlink: $(stat -c %a $TMPDIR/victim/sub)"
   # A second launch on the same data dir but its own runtime dir, so it
@@ -99,6 +106,12 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   refused with-home "unset AGENT_HOME" AGENT_HOME_MODE=ephemeral AGENT_HOME=$TMPDIR/elsewhere
   refused with-direnv "DIRENV_ALLOW=1 cannot be combined" AGENT_HOME_MODE=ephemeral DIRENV_ALLOW=1
   refused bogus "AGENT_HOME_MODE must be persistent or ephemeral" AGENT_HOME_MODE=temp
+  # The launcher's state inside the work share is the guest's to write.
+  refused inside-work "is inside WORK_DIR" AGENT_HOME_MODE=ephemeral WORK_DIR=$TMPDIR
+  launch inside-work-persistent WORK_DIR=$TMPDIR
+  if [ "$(cat $TMPDIR/inside-work-persistent/rc)" = 0 ] && grep -q "is inside WORK_DIR=.*the guest can write this launcher's state" $TMPDIR/inside-work-persistent/out; then
+    ok "a persistent launch with its state inside the work share runs, and is warned"
+  else bad "persistent launch inside WORK_DIR: rc $(cat $TMPDIR/inside-work-persistent/rc)"; cat $TMPDIR/inside-work-persistent/out >&2; fi
 
   # --- the default --------------------------------------------------------------------
   launch default

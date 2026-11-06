@@ -70,6 +70,10 @@ BEGIN {
     for (i = 1; i <= ndeny; i++)
       if (under(d = dorder[i], h)) { mark = "⚠"; wide[d] = wide[d] " " e " (" label ")"; nwide++ }
   if (mark != "✗") print line > allowout
+  # Which model endpoints a kept entry covers on their port, 443: under
+  # alert, which watches the assembled list, they then do not alert.
+  if (mark != "✗" && e !~ /:[0-9]+$/)
+    for (k = 1; k <= nep; k++) if (under(ephost[k], h)) epallowed[k] = 1
   key = label SUBSEP mark e
   # Sorted by host later, so the marker rides after a "|" until then.
   if (!(key in entries)) { entries[key] = 1; list[label] = list[label] " " e "|" mark }
@@ -117,8 +121,10 @@ END {
   # The model endpoints are the proxy's, so only the sealed modes exempt them;
   # under alert, which only watches, the agent's API host is one more
   # off-list destination.
-  if (builtin == "0" && mode == "alert")
-    out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above; the agent's own API traffic alerts too" Z "\n"
+  if (builtin == "0" && mode == "alert") {
+    na = ""; for (k = 1; k <= nep; k++) if (!(k in epallowed)) na = na " " ephost[k]
+    out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above" (na != "" ? "; the agent's own API traffic to" na " alerts too" : ", which covers the agent's API host") Z "\n"
+  }
   else if (builtin == "0")
     out = out "                " D "off  " Z " " B "built-in lists" Z D " — EGRESS_BUILTIN=0: only the above, and the agent's model endpoints" Z "\n"
   if (mode == "enforce") last = R "deny " Z " " B "everything else" Z D ", and any port an entry does not grant" Z
