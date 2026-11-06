@@ -276,20 +276,32 @@
         # their sweep, the egress logs beside them — must not lie inside the
         # work share, or the guest can write it: rewrite the record of its own
         # traffic, plant files in the next launch's home, or swap the paths
-        # the sweep is about to remove. An ephemeral launch refuses that; a
+        # the sweep is about to remove. Nor may the work share lie inside that
+        # state — the .ephemeral dir, another launch's home — which would hand
+        # the guest every home there. An ephemeral launch refuses either; a
         # persistent one, which always ran like this, is warned.
-        _STATE_DIRS=("$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")")
-        if [ -n "''${AGENT_HOME:-}" ]; then _STATE_DIRS+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
-        for _s in "''${_STATE_DIRS[@]}"; do
-          case "$_s/" in
-            "$WORK"/*)
-              if [ "$AGENT_HOME_MODE" = ephemeral ]; then
-                echo "error: $_s is inside WORK_DIR=$WORK, which the guest can write; AGENT_HOME_MODE=ephemeral needs its state out of the guest's reach — use a WORK_DIR that does not contain it" >&2
-                exit 1
-              fi
-              echo "warning: $_s is inside WORK_DIR=$WORK: the guest can write this launcher's state there (agent homes, egress logs)" >&2 ;;
-          esac
+        #
+        # The data dir is checked both ways. An explicit AGENT_HOME is checked
+        # by its parent, where its -egress/-cri/-store siblings live, and only
+        # for lying inside the work share: a project beside ~/.my-agent-home
+        # is inside that parent ($HOME) and is no overlap.
+        _DATA_DIR="$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")"
+        _STATE_IN=("$_DATA_DIR")
+        if [ -n "''${AGENT_HOME:-}" ]; then _STATE_IN+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
+        # "" for WORK=/, so that "$_W"/* matches every absolute path.
+        _W="''${WORK%/}"
+        _OVERLAP=""
+        for _s in "''${_STATE_IN[@]}"; do
+          case "$_s/" in "$_W"/*) _OVERLAP="$_s is inside WORK_DIR=$WORK"; break ;; esac
         done
+        case "$_W/" in "$_DATA_DIR"/*) _OVERLAP="WORK_DIR=$WORK is inside $_DATA_DIR" ;; esac
+        if [ -n "$_OVERLAP" ]; then
+          if [ "$AGENT_HOME_MODE" = ephemeral ]; then
+            echo "error: $_OVERLAP, and the guest can write the work share; AGENT_HOME_MODE=ephemeral needs this launcher's state out of the guest's reach — use a WORK_DIR that neither contains it nor lies inside it" >&2
+            exit 1
+          fi
+          echo "warning: $_OVERLAP: the guest can write this launcher's state through the work share (agent homes, egress logs)" >&2
+        fi
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"

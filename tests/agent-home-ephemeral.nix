@@ -108,10 +108,22 @@ pkgs.runCommand "agent-home-ephemeral" { nativeBuildInputs = [ pkgs.socat pkgs.s
   refused bogus "AGENT_HOME_MODE must be persistent or ephemeral" AGENT_HOME_MODE=temp
   # The launcher's state inside the work share is the guest's to write.
   refused inside-work "is inside WORK_DIR" AGENT_HOME_MODE=ephemeral WORK_DIR=$TMPDIR
+  refused root-work "/[^ ]* is inside WORK_DIR=/," AGENT_HOME_MODE=ephemeral WORK_DIR=/
+  # The other way round: a work share that is the .ephemeral dir, or one
+  # launch's home, would show the guest every home there.
+  refused work-is-ephemeral "WORK_DIR=$EPH is inside $DATA" AGENT_HOME_MODE=ephemeral WORK_DIR=$EPH
+  mkdir -p $EPH/ffffffffffff/home
+  refused work-in-a-home "WORK_DIR=$EPH/ffffffffffff/home is inside $DATA" AGENT_HOME_MODE=ephemeral WORK_DIR=$EPH/ffffffffffff/home
   launch inside-work-persistent WORK_DIR=$TMPDIR
   if [ "$(cat $TMPDIR/inside-work-persistent/rc)" = 0 ] && grep -q "is inside WORK_DIR=.*the guest can write this launcher's state" $TMPDIR/inside-work-persistent/out; then
     ok "a persistent launch with its state inside the work share runs, and is warned"
   else bad "persistent launch inside WORK_DIR: rc $(cat $TMPDIR/inside-work-persistent/rc)"; cat $TMPDIR/inside-work-persistent/out >&2; fi
+  # An AGENT_HOME beside the project, as in the README, is no overlap.
+  mkdir -p $HOME/project
+  launch beside AGENT_HOME=$HOME/.my-agent-home WORK_DIR=$HOME/project
+  if [ "$(cat $TMPDIR/beside/rc)" = 0 ] && ! grep -q "inside WORK_DIR\|is inside " $TMPDIR/beside/out; then
+    ok "AGENT_HOME=~/.my-agent-home with a project in ~ is not taken for an overlap"
+  else bad "AGENT_HOME beside the project was flagged:"; grep "inside" $TMPDIR/beside/out >&2; fi
 
   # --- the default --------------------------------------------------------------------
   launch default

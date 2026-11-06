@@ -353,8 +353,9 @@ with `DIRENV_ALLOW=1`: the dev shell's guard against evaluating Nix files a
 guest rewrote remembers its last evaluation in agent home, and a fresh one
 would let every evaluation through unprompted. It also refuses a `WORK_DIR` that
 contains its own state (`$XDG_DATA_HOME/<agent>-microvm`, or `AGENT_HOME`'s
-parent), such as `WORK_DIR=$HOME`: the guest could write the egress logs and
-the homes the next launch sweeps. A persistent launch is only warned about that
+parent), such as `WORK_DIR=$HOME` or `/`, and one that lies inside
+`$XDG_DATA_HOME/<agent>-microvm` (its `.ephemeral` directory, a launch's home):
+either way the guest could write the egress logs and other launches' homes. A persistent launch is only warned about that
 layout, which it always allowed. Signing in by OAuth leaves
 nothing to reuse either, so ephemeral homes go with an API key.
 
