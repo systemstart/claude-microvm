@@ -4,10 +4,11 @@
 # sides of the contract reject unknown or malformed fields. Extract the region from the
 # *built* claude runner (so Nix-to-shell escaping is covered, like
 # settings-seed) and feed its output to the real egress-proxy binary, in both
-# key modes: host key present (injection) and absent (OAuth passthrough).
+# key modes: host key present (injection) and absent (OAuth passthrough),
+# and with the API_BUDGET_* caps the launcher passes on.
 { pkgs, lib, runner, egressProxy }:
 
-pkgs.runCommand "egress-config" { } ''
+pkgs.runCommand "egress-config" { nativeBuildInputs = [ pkgs.jq ]; } ''
   script=${runner}/bin/microvm-run
   awk '/# BEGIN egress-proxy-config/{f=1;next} /# END egress-proxy-config/{f=0} f' "$script" > region.sh
   if [ ! -s region.sh ]; then
@@ -21,6 +22,7 @@ pkgs.runCommand "egress-config" { } ''
   export _EGRESS_ALLOWLIST_FILE=$PWD/allow.txt
   export EGRESS_AUDIT=$PWD/audit.jsonl
   export _EGRESS_PORTFILE=$PWD/port
+  export _EGRESS_USAGE_FILE=$PWD/usage.json _EGRESS_BUDGET_REQUESTS= _EGRESS_BUDGET_TOKENS=
 
   fail=0
   ok ()  { echo "ok: $1"; }
@@ -69,6 +71,27 @@ pkgs.runCommand "egress-config" { } ''
   else
     bad "egress-proxy refused the passthrough config: $(cat proxy.log)"
   fi
+
+  if [ "$(jq -c '.endpoints[0] | [.usage, .budget]' cfg.json)" = '["anthropic",null]' ] && [ "$(jq -r .usageFile cfg.json)" = "$PWD/usage.json" ]; then
+    ok "without API_BUDGET_* the endpoint is metered, uncapped, and the usage file named"
+  else
+    bad "unbudgeted config: $(cat cfg.json)"
+  fi
+  [ -s usage.json ] && ok "the proxy writes the usage file as it starts" || bad "no usage file at start: $(cat proxy.log)"
+
+  # API_BUDGET_REQUESTS / API_BUDGET_TOKENS, as the launcher passes them on;
+  # either alone is a budget, the other limit 0 (none).
+  for b in "3 1000" "3 -" "- 1000"; do
+    set -- $b
+    r=$1 t=$2; [ "$r" = - ] && r=""; [ "$t" = - ] && t=""
+    ( set -euo pipefail; export _EGRESS_BUDGET_REQUESTS=$r _EGRESS_BUDGET_TOKENS=$t; . ./region.sh )
+    want="{\"maxRequests\":''${r:-0},\"maxTokens\":''${t:-0}}"
+    if [ "$(jq -c '.endpoints[0].budget' cfg.json)" = "$want" ] && starts; then
+      ok "a budget of $b is passed on as $want, and the proxy accepts it"
+    else
+      bad "budget $b: $(jq -c '.endpoints[0]' cfg.json), proxy: $(cat proxy.log)"
+    fi
+  done
 
   [ "$fail" -eq 0 ] || exit 1
   touch $out

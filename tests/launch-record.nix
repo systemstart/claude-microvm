@@ -10,6 +10,10 @@
 #   - at exit `ended` has the exit status, whether VM_TIMEOUT cut it short,
 #     and the egress decision counts, and for a sealed run the egress verdict
 #     (microvm-policy egress-report verdict): clean, not-clean, invalid;
+#   - API_BUDGET_REQUESTS / API_BUDGET_TOKENS reach the real proxy, which
+#     refuses past them; the record names the budget at boot and has what
+#     was spent at exit; a bad value, or a budget without the proxy, is
+#     refused before boot;
 #   - a launch that fails before boot leaves no record, not even an earlier
 #     one; a killed launcher leaves `ended` null;
 #   - a path the guest can write, or that is not a regular file, is refused.
@@ -18,7 +22,7 @@
 let
   harness = import ./lib/stubbed-launcher.nix { inherit pkgs runner; };
 in
-pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite pkgs.jq ]; } ''
+pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite pkgs.jq pkgs.curl ]; } ''
   fail=0
   ok ()  { echo "ok: $1"; }
   bad () { echo "FAIL: $1" >&2; fail=1; }
@@ -102,9 +106,39 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
   launch unrecorded EGRESS_POLICY=enforce EGRESS_BUILTIN=0 HOLD=$TMPDIR/release
   ! grep -q 'egress verdict' $TMPDIR/unrecorded/out && ok "without a record no verdict is run" || bad "verdict printed without a record"
 
+
+  # --- the API budget ---------------------------------------------------------------------
+  # The proxy is real; api.anthropic.com is out of the build's reach, so the
+  # first request is spent on a 502 and the second refused past the budget.
+  launch budget LAUNCH_RECORD=$R EGRESS_POLICY=enforce EGRESS_BUILTIN=0 API_BUDGET_REQUESTS=1 API_BUDGET_TOKENS=5000 HOLD=$TMPDIR/budget-release &
+  for _ in $(seq 1 300); do [ -e $TMPDIR/budget/started ] && break; sleep 0.1; done
+  B=$TMPDIR/budget-boot.json; cp $R $B
+  [ "$(jq -c .egress.apiBudget $B)" = '{"maxRequests":1,"maxTokens":5000}' ] && [ "$(jq -c '.egress.endpoints | map(.usage)' $B)" = '["anthropic"]' ] \
+    && [ -f "$(jq -r .egress.usageFile $B)" ] \
+    && ok "the record names the API budget, the metered endpoint and the usage file" || bad "budget at boot: $(jq -c .egress $B)"
+  grep -q 'api budget.*1 requests, 5000 tokens per model endpoint' $TMPDIR/budget/out \
+    && ok "the contract shows the budget" || bad "contract: $(grep -i budget $TMPDIR/budget/out)"
+  port=$(cat "$(dirname "$(cat $TMPDIR/budget/exported)")/egress.port"); port=''${port##*:}
+  codes=""
+  for _ in 1 2; do
+    codes="$codes $(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST --data '{}' http://127.0.0.1:$port/anthropic/v1/messages || true)"
+  done
+  [ "$codes" = " 502 403" ] && ok "past API_BUDGET_REQUESTS the proxy refuses (403)" || bad "budget statuses:$codes"
+  touch $TMPDIR/budget-release; wait
+  [ "$(cat $TMPDIR/budget/rc)" = 0 ] \
+    && [ "$(jq -c '.ended.apiUsage | map([.prefix, .requests, .refused, .exhausted, (.tokens | add), .budget])' $R)" = '[["/anthropic",1,1,true,0,{"maxRequests":1,"maxTokens":5000}]]' ] \
+    && [ "$(jq -r .ended.egressDecisions.overBudget $R)" = 1 ] \
+    && ok "at exit the record has what was spent, and the refusal counted" \
+    || bad "budget at exit: rc $(cat $TMPDIR/budget/rc), $(jq -c '.ended | {apiUsage, egressDecisions}' $R)"
+  grep -q '^api /anthropic: 1 requests, 0 tokens, 1 refused — budget spent$' $TMPDIR/budget/out \
+    && grep -q 'the API budget ran out: 1 requests refused' $TMPDIR/budget/out \
+    && ok "the session end says what the API cost and that the budget ran out" || bad "summary: $(grep -i 'api\|budget' $TMPDIR/budget/out)"
+  [ "$(jq -r .ended.egressVerdict.outcome $R)" = not-clean ] && jq -r '.ended.egressVerdict.details[]' $R | grep -q over_budget \
+    && ok "a run refused past its budget is judged not clean" || bad "budget verdict: $(jq -c .ended.egressVerdict $R)"
+
   # --- cut short, and open ------------------------------------------------------------
   launch short LAUNCH_RECORD=$R VM_TIMEOUT=1 VM_TIMEOUT_GRACE=2 QMP=1 HOLD=$TMPDIR/never
-  [ "$(jq -c '.ended | [.exitStatus, .timedOut, .egressDecisions, .egressVerdict]' $R)" = '[124,true,null,null]' ] \
+  [ "$(jq -c '.ended | [.exitStatus, .timedOut, .egressDecisions, .apiUsage, .egressVerdict]' $R)" = '[124,true,null,null,null]' ] \
     && [ "$(jq -r .egress.policy $R)" = open ] && [ "$(jq -r .egress.allowlist $R)" = null ] \
     && ok "a launch VM_TIMEOUT cut short records 124 and timedOut; an open one, no allowlist or decisions" \
     || { bad "short/open record: $(jq -c '{egress, ended}' $R 2>/dev/null), rc $(cat $TMPDIR/short/rc)"; grep -v socat $TMPDIR/short/out | tail -25 >&2; }
@@ -179,6 +213,9 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
   refused a-dir "is not a regular file" LAUNCH_RECORD=$TMPDIR/records/adir
   refused a-link "is not a regular file" LAUNCH_RECORD=$TMPDIR/records/link
   refused no-parent "is not a directory" LAUNCH_RECORD=$TMPDIR/nowhere/run.json
+  refused budget-nan "API_BUDGET_TOKENS must be a positive integer" EGRESS_POLICY=enforce API_BUDGET_TOKENS=lots
+  refused budget-zero "API_BUDGET_REQUESTS must be a positive integer" EGRESS_POLICY=enforce API_BUDGET_REQUESTS=0
+  refused budget-unsealed "need EGRESS_POLICY=shadow|enforce" EGRESS_POLICY=monitor API_BUDGET_REQUESTS=10
 
   [ "$fail" -eq 0 ] || exit 1
   touch $out

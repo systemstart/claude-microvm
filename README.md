@@ -540,9 +540,9 @@ It is written just before the VM boots and completed when the launch ends:
 | `workspace` | `dir`, `mode` (`passthrough`/`ephemeral`), `guard` |
 | `agentHome` | `dir`, `mode` (`persistent`/`ephemeral`) |
 | `shares`, `timeout`, `resources` | as in `instance.json`; memory and vCPUs as passed |
-| `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants (sealed modes) |
+| `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants and `usage` (the token parser, or null) (sealed modes); `usageFile`, and `apiBudget` (`maxRequests`, `maxTokens`; null without `API_BUDGET_*`) |
 | `env` | the names — never the values — of the API keys and `EXTRA_ENV` passed in, and `devShellFromHost` (`DIRENV_ALLOW=1`) |
-| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
+| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny`/`overBudget` counts from the audit log; null outside shadow/enforce), `apiUsage` (per model endpoint: `requests`, `refused`, `tokens` by kind, `budget`, `exhausted` — the proxy's usage file; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
 
 A record whose `ended` is still `null` after the launcher has gone is one whose
 launcher was killed. A record already at the path is removed when the launcher
@@ -574,7 +574,7 @@ one-line verdict, keeps the whole of it beside the audit log
 
 `outcome` is `clean` only when every decision was an allowed request to a
 model-API endpoint — an allowed tunnel counts against the run as much as a
-denied one, and so does a shadow `would_deny`. Otherwise it is `not-clean`,
+denied one, and so does a shadow `would_deny` or a request refused past the [API budget](#api-budget) (`over_budget`). Otherwise it is `not-clean`,
 `invalid` (a line in the log is not a proxy decision), `missing` (no log), or
 `error`; `details` names each other decision with its count. Only a run that
 keeps a record is judged — with the built-in allowlists on, an ordinary
@@ -881,6 +881,37 @@ host's own proxy environment. Claude Code's WebSearch and WebFetch tools
 execute server-side on Anthropic's infrastructure, so they appear here only as
 traffic to `api.anthropic.com`.
 
+#### API budget
+
+In the sealed modes the proxy also counts what the session spends on the model
+API, and can cap it:
+
+```sh
+EGRESS_POLICY=enforce API_BUDGET_TOKENS=2000000 API_BUDGET_REQUESTS=300 make claude.run
+```
+
+- **Each limit applies to each model endpoint, for this launch.**
+  `API_BUDGET_REQUESTS` counts requests. `API_BUDGET_TOKENS` counts input,
+  cache-creation, cache-read and output tokens together, read from the
+  responses as they pass. Past either limit the proxy answers
+  `403` — not `429`, which the clients would retry — with a message that the
+  budget is spent, and logs `over_budget` in the audit log, in `shadow` as in
+  `enforce`.
+- **Tokens are only counted for Anthropic's API** (claude, and pi's
+  `/anthropic`). On gemini and codex `API_BUDGET_TOKENS` is refused at launch;
+  `API_BUDGET_REQUESTS` caps them. For pi, the token limit caps `/anthropic`
+  only; the request limit caps all three endpoints.
+- **The limit is checked before a request goes upstream.** A request already
+  under way finishes, so a session can end a little over `API_BUDGET_TOKENS`
+  — by what its last concurrent requests returned.
+- **Without a budget the spend is still recorded.** Each launch writes
+  `session-<…>.usage.json` (`latest.usage.json`) beside the audit log, kept
+  current after every response, and the session summary at exit has a line
+  per endpoint: `api /anthropic: 41 requests, 1830412 tokens`.
+- **A budget outside the sealed modes is an error**, not a warning: it is
+  the proxy that enforces it, and a spending limit that silently does nothing
+  is worse than none.
+
 A practical rollout for a team: run `monitor` over real workloads first, build
 the org allowlist from the reports (they live in `<agent-home>-egress/`), then
 switch the default to `alert` — each step changes observability, never
@@ -1001,6 +1032,8 @@ Rebuild with `make claude`.
 | `EGRESS_ALLOWLIST` | Path to an additional allowlist file (org or project policy), appended to the baked-in default for `alert`/`shadow`/`enforce` | (none) |
 | `EGRESS_BUILTIN` | `0` leaves the baked-in allowlists out for `alert`/`shadow`/`enforce`: only `EGRESS_ALLOWLIST` and `EGRESS_ALLOW` apply, and the agent's model endpoints, which are no allowlist entry. See [Egress policy](#egress-policy) | `1` |
 | `EGRESS_DENY` | Allowlist domains to remove for `alert`/`shadow`/`enforce`, comma-separated: drops each entry that is a listed domain or below one, after all additions. Cannot narrow a broader entry (warns instead) | (none) |
+| `API_BUDGET_REQUESTS` | Requests the session may send to each model endpoint in `shadow`/`enforce`; past it the proxy refuses them (403). See [API budget](#api-budget) | (none) |
+| `API_BUDGET_TOKENS` | Tokens (input, cache and output together) the session may spend on each model endpoint in `shadow`/`enforce` — Anthropic's API only; refused on gemini and codex. See [API budget](#api-budget) | (none) |
 | `EGRESS_KEEP_PCAP` | Set to keep the raw capture after the summary is written; by default it is deleted and only the report persists | (unset) |
 | `EGRESS_PCAP_MAXLEN` | Captured bytes per packet in `monitor`/`alert` | `4096` |
 | `EXTRA_ENV` | Extra environment variables to forward into the VM, comma-separated. `FOO=bar` assigns a literal value; a bare `FOO` forwards `$FOO` from the host environment (keeps secrets off the command line). | (none) |

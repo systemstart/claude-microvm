@@ -79,6 +79,7 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   ( set -euo pipefail
     _EGRESS_PROXY_CFG=$PWD/cfg.json _EGRESS_PROXY_MODE=enforce
     _EGRESS_ALLOWLIST_FILE=$PWD/allow.txt EGRESS_AUDIT=$PWD/audit.jsonl _EGRESS_PORTFILE=$PWD/port
+    _EGRESS_USAGE_FILE=$PWD/usage.json _EGRESS_BUDGET_REQUESTS= _EGRESS_BUDGET_TOKENS=
     ANTHROPIC_API_KEY=host-held
     . ./egress-proxy-config.sh )
   ANTHROPIC_API_KEY=host-held ${egressProxy}/bin/egress-proxy -config cfg.json > proxy.log 2>&1 &
