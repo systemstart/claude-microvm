@@ -562,7 +562,9 @@ status (124, say) is kept, and a clean run exits 1.
 
 For a sealed run (`EGRESS_POLICY=shadow` or `enforce`) the launcher judges the
 audit log at exit with microvm-policy's `egress-report verdict`, prints its
-one-line verdict, and records it as `ended.egressVerdict`:
+one-line verdict, keeps the whole of it beside the audit log
+(`session-<…>.verdict.txt`, `latest.verdict.txt`), and records it as
+`ended.egressVerdict`:
 
 ```json
 {"outcome": "not-clean",

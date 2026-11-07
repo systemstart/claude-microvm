@@ -85,6 +85,20 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
   touch $TMPDIR/release2; wait
   [ "$(jq -r .ended.egressVerdict.outcome $R)" = invalid ] && [ "$(cat $TMPDIR/garbled/rc)" = 0 ] \
     && ok "a truncated audit log is judged invalid, never clean" || bad "garbled verdict: $(jq -c .ended.egressVerdict $R 2>/dev/null)"
+  # A guest that tries thousands of destinations: a verdict longer than one
+  # command-line argument may be (128 KiB) is still recorded whole.
+  rm -f $TMPDIR/release3
+  launch flood LAUNCH_RECORD=$R EGRESS_POLICY=enforce EGRESS_BUILTIN=0 HOLD=$TMPDIR/release3 &
+  for _ in $(seq 1 300); do [ -e $TMPDIR/flood/started ] && break; sleep 0.1; done
+  seq 1 5000 | awk '{printf "{\"time\":\"t\",\"level\":\"INFO\",\"msg\":\"decision\",\"kind\":\"connect\",\"host\":\"h%d.probe.example.com\",\"port\":443,\"path\":\"\",\"decision\":\"deny\",\"mode\":\"enforce\"}\n", $1}' \
+    >> "$(jq -r .egress.auditLog $R)"
+  touch $TMPDIR/release3; wait
+  V="$(dirname "$(jq -r .egress.auditLog $R)")/latest.verdict.txt"
+  [ "$(cat $TMPDIR/flood/rc)" = 0 ] && [ "$(jq -r .ended.egressVerdict.outcome $R)" = not-clean ] \
+    && [ "$(jq '.ended.egressVerdict.details | length' $R)" = 5000 ] && [ "$(wc -c < "$V")" -gt 131072 ] \
+    && [ "$(head -n 1 "$V")" = "$(jq -r .ended.egressVerdict.summary $R)" ] \
+    && ok "a verdict past 128 KiB is recorded whole, and kept beside the audit log" \
+    || { bad "flood verdict: rc $(cat $TMPDIR/flood/rc), $(jq -c '.ended | {o: .egressVerdict.outcome, n: (.egressVerdict.details | length)}' $R 2>/dev/null)"; tail -3 $TMPDIR/flood/out >&2; }
   launch unrecorded EGRESS_POLICY=enforce EGRESS_BUILTIN=0 HOLD=$TMPDIR/release
   ! grep -q 'egress verdict' $TMPDIR/unrecorded/out && ok "without a record no verdict is run" || bad "verdict printed without a record"
 
