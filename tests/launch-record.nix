@@ -94,6 +94,32 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
   [ -f $R ] && [ "$(jq -r .ended $R)" = null ] && ok "a launcher killed outright leaves its record with ended null" || bad "killed launch record: $(cat $R 2>/dev/null)"
   pkill -f "$STUBS/qemu" 2>/dev/null || true
 
+  # --- a record that cannot be written ------------------------------------------------
+  # At exit: the VM's own status stands (124 here); a clean run becomes 1.
+  # The directory loses its write permission while the VM runs.
+  for case in "short 124 VM_TIMEOUT=1 VM_TIMEOUT_GRACE=2 QMP=1 HOLD=$TMPDIR/never" "clean 1 HOLD=$TMPDIR/later"; do
+    set -- $case; n=$1 want=$2; shift 2
+    rm -f $TMPDIR/later
+    launch nowrite-$n LAUNCH_RECORD=$R "$@" &
+    for _ in $(seq 1 300); do [ -e $TMPDIR/nowrite-$n/started ] && break; sleep 0.1; done
+    chmod 500 $TMPDIR/records; touch $TMPDIR/later; wait
+    chmod 700 $TMPDIR/records
+    if [ "$(cat $TMPDIR/nowrite-$n/rc)" = "$want" ] && grep -q "could not complete LAUNCH_RECORD" $TMPDIR/nowrite-$n/out \
+       && [ "$(jq -r .ended $R)" = null ] && [ -z "$(find $TMPDIR/records -maxdepth 1 -name 'run.json.*')" ]; then
+      ok "a record that cannot be completed is reported, exit $want, ended left null, no temporary file ($n)"
+    else bad "unwritable at exit ($n): rc $(cat $TMPDIR/nowrite-$n/rc)"; grep -i record $TMPDIR/nowrite-$n/out >&2; fi
+  done
+  # At boot: no record, no VM — whether an earlier record is there to remove
+  # (old) or the new one cannot be created (new).
+  for n in old new; do
+    if [ $n = new ]; then rm -f $R; else [ -f $R ] || echo '{}' > $R; fi
+    chmod 500 $TMPDIR/records
+    launch nowrite-boot-$n LAUNCH_RECORD=$R
+    chmod 700 $TMPDIR/records
+    [ "$(cat $TMPDIR/nowrite-boot-$n/rc)" != 0 ] && [ ! -e $TMPDIR/nowrite-boot-$n/started ] && grep -q "cannot write LAUNCH_RECORD" $TMPDIR/nowrite-boot-$n/out \
+      && ok "a record that cannot be written at boot stops the launch before the VM ($n)" || { bad "unwritable at boot ($n): rc $(cat $TMPDIR/nowrite-boot-$n/rc)"; tail -3 $TMPDIR/nowrite-boot-$n/out >&2; }
+  done
+
   # --- where it may go --------------------------------------------------------------------
   refused () { # name message, then env
     n=$1 msg=$2; shift 2

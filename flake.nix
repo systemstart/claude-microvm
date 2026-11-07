@@ -158,7 +158,10 @@
             echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is not a regular file" >&2
             exit 1
           fi
-          rm -f "$_RECORD"
+          if ! rm -f "$_RECORD" 2>/dev/null; then
+            echo "error: cannot write LAUNCH_RECORD=$LAUNCH_RECORD: the earlier record cannot be removed" >&2
+            exit 1
+          fi
         fi
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         # Derive project basename for host-visible identifiers
@@ -1518,11 +1521,16 @@ EOF
         # The launch record, as of boot. Names only, never values, as in the
         # contract. Written whole: a file of its own, made owner-only and new
         # by mktemp (never one that was there before), renamed into place.
+        # Fails, leaving no temporary file, on any error: the caller decides
+        # what a record it could not write means.
         _record_write () { # json
           local tmp
-          tmp="$(mktemp "$_RECORD.XXXXXX")"
-          printf '%s\n' "$1" > "$tmp"
-          mv -f "$tmp" "$_RECORD"
+          [ -n "$1" ] || return 1
+          tmp="$(mktemp "$_RECORD.XXXXXX" 2>/dev/null)" || return 1
+          if ! { printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$_RECORD"; } 2>/dev/null; then
+            rm -f "$tmp"
+            return 1
+          fi
         }
         _RECORD_JSON=""
         if [ -n "$_RECORD" ]; then
@@ -1559,7 +1567,11 @@ EOF
                        endpoints: (if ($policy == "shadow" or $policy == "enforce") then $endpoints else [] end)},
               env: {apiKeys: $keys, extraEnv: $extraEnv, devShellFromHost: ($direnv == "1")},
               ended: null}')"
-          _record_write "$_RECORD_JSON"
+          # Evidence the launch cannot give is a launch that should not run.
+          if ! _record_write "$_RECORD_JSON"; then
+            echo "error: cannot write LAUNCH_RECORD=$LAUNCH_RECORD" >&2
+            exit 1
+          fi
         fi
 
         # --- Wall-clock limit (VM_TIMEOUT) ---
@@ -1656,14 +1668,20 @@ EOF
         esac
         # The record, completed: how the launch ended. A record whose `ended`
         # is still null is one whose launcher never got here — killed.
+        # Failing to, the launch says so and does not exit 0 — but a VM status
+        # that is already non-zero (124, say) is the one it keeps.
         if [ -n "$_RECORD" ]; then
-          _record_write "$(${pkgs.jq}/bin/jq -c \
+          _ENDED_JSON="$(${pkgs.jq}/bin/jq -c \
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson status "$_VM_RC" \
             --argjson timedOut "$([ -e "$INSTANCE_DIR/timed-out" ] && echo true || echo false)" \
             --argjson allowed "''${_allow:-null}" --argjson denied "''${_deny:-null}" --argjson wouldDeny "''${_would:-null}" \
             '.ended = {at: $at, exitStatus: $status, timedOut: $timedOut,
                        egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end)}' \
-            <<< "$_RECORD_JSON")"
+            <<< "$_RECORD_JSON")" || _ENDED_JSON=""
+          if ! _record_write "$_ENDED_JSON"; then
+            echo "warning: could not complete LAUNCH_RECORD=$LAUNCH_RECORD; it still says ended: null" >&2
+            [ "$_VM_RC" -ne 0 ] || _VM_RC=1
+          fi
         fi
         exit "$_VM_RC"
       '';

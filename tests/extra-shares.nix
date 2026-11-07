@@ -50,6 +50,13 @@ let
         && refusedAt { claude-vm.shares.a.mountPoint = "/run/microvm"; };
     }
     {
+      name = "a mount point not spelled canonically is refused: /data beside /data/., /./work, /x/, /x//y";
+      ok = refusedAt { claude-vm.shares = { a.mountPoint = "/data"; b.mountPoint = "/data/."; }; }
+        && refusedAt { claude-vm.shares.a.mountPoint = "/./work"; }
+        && refusedAt { claude-vm.shares.a.mountPoint = "/x/"; }
+        && refusedAt { claude-vm.shares.a.mountPoint = "/x//y"; };
+    }
+    {
       name = "two shares on one mount point are refused";
       ok = refusedAt { claude-vm.shares = { a.mountPoint = "/data"; b.mountPoint = "/data"; }; };
     }

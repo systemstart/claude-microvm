@@ -222,7 +222,9 @@ SHARE_SKILL=~/skills/pinned SHARE_AUDIT_OUT=~/audits/project ./result/bin/microv
   and the egress logs, `$XDG_RUNTIME_DIR/claude-microvm` every running
   launch's env file with its API keys, and an explicit `AGENT_HOME` has its
   `-egress`, `-cri` and `-store` siblings.
-- No two shares may use the same mount point.
+- No two shares may use the same mount point, and each is written in one
+  canonical form: absolute, with no empty, `.` or `..` component and no
+  trailing `/` (`/data`, not `/data/`, `/data/.` or `/./data`).
 - Names are 1-16 of `a-z`, `0-9` and `-`; a mount point must stay clear of
   `/work`, `/home/agent`, `/run/microvm`, `/nix` and the system's own
   directories.
@@ -552,6 +554,11 @@ fresh file of its own. It may not be anywhere the guest can write — inside
 file would really be — and its directory must be yours and writable by no one
 else (so not `/tmp`). Those checks come before anything is removed: a path that
 is refused keeps whatever file it held.
+
+A record that cannot be written stops the launch before the VM boots: no
+evidence, no run. A record that cannot be completed at exit is reported on
+stderr and keeps `ended: null`; the launch then never exits 0 — a non-zero VM
+status (124, say) is kept, and a clean run exits 1.
 
 ### Launch scope
 

@@ -296,6 +296,14 @@ in
         message = "claude-vm.shares.${name}: a share name is 1-16 of a-z, 0-9 and -, starting with a letter or digit";
       }
       {
+        # The checks below compare mount points as strings, which holds only
+        # for one spelling per path: /data/. is /data to systemd, /./work is
+        # /work.
+        assertion = builtins.match "(/[^/]+)+" s.mountPoint != null
+          && !(lib.any (c: c == "." || c == "..") (lib.splitString "/" s.mountPoint));
+        message = "claude-vm.shares.${name}: mountPoint '${s.mountPoint}' must be canonical: absolute, with no empty, . or .. component and no trailing /";
+      }
+      {
         assertion = lib.hasPrefix "/" s.mountPoint
           && !(lib.any (p: s.mountPoint == p || lib.hasPrefix "${p}/" s.mountPoint || lib.hasPrefix "${s.mountPoint}/" p)
                  [ "/work" "/home/agent" instance.dir "/nix" ])
