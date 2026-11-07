@@ -5,7 +5,7 @@ export AGENTS_ARGS
 
 WORK_DIR ?= $(shell pwd)
 
-.PHONY: claude claude.run gemini gemini.run codex codex.run pi pi.run release-tag
+.PHONY: claude claude.run gemini gemini.run codex codex.run pi pi.run vms stop release-tag
 
 claude:
 	nix build $(NIX_FLAGS) .#claude
@@ -30,6 +30,17 @@ pi:
 
 pi.run: pi
 	WORK_DIR=$(WORK_DIR) ./result/bin/microvm-run
+
+# Running launches, of every flavor, and stopping one by its power button
+# (scripts/microvm-stop.sh; README "Stopping a VM from outside"):
+#   make vms                       list them: ID, start, flavor, terminal, project
+#   make stop ID=<id>              power one off; without ID, the only one running
+#   make stop ID=<id> FORCE=1      stop QEMU at once, with no shutdown in the guest
+vms:
+	@nix run $(NIX_FLAGS) .#microvm-stop -- --list
+
+stop:
+	@nix run $(NIX_FLAGS) .#microvm-stop -- $(if $(FORCE),--force) $(ID)
 
 # The annotated tag's body becomes the release notes (see .github/workflows/release.yml),
 # so it is written here, before the tag is pushed — not patched into the release after.

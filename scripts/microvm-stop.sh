@@ -3,9 +3,11 @@
 # as it does after any VM exit — daemons stopped, instance dir removed.
 #
 #   microvm-stop [--force] [--timeout <seconds>] [<id> | <instance dir>]
+#   microvm-stop --list
 #
 # Without an argument it stops the only running launch, and lists them if
-# there is more than one. `set -euo pipefail` comes from writeShellApplication.
+# there is more than one; --list lists them, with what tells them apart.
+# `set -euo pipefail` comes from writeShellApplication.
 #
 # A launch's instance dir is $XDG_RUNTIME_DIR/claude-microvm/vms/<id> (see
 # "Instance dir" in flake.nix). Its QMP socket is always qmp.sock there — taken
@@ -21,15 +23,18 @@
 
 usage() {
   echo "usage: microvm-stop [--force] [--timeout <seconds>] [<id> | <instance dir>]" >&2
+  echo "       microvm-stop --list" >&2
   exit 2
 }
 
 force=0
+list=0
 timeout=60
 target=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) force=1 ;;
+    -l|--list) list=1 ;;
     --timeout) [ $# -ge 2 ] || usage; timeout="$2"; shift ;;
     --timeout=*) timeout="${1#--timeout=}" ;;
     -h|--help) usage ;;
@@ -63,15 +68,37 @@ if [ -d "$vms" ]; then
   done
 fi
 
+# One line per running launch, with what tells them apart when several run on
+# one project: when each started (local time), its flavor, and the terminal its
+# launcher runs in — `tty` in every terminal you can still type into names the
+# others, so a hung one is the terminal left over.
+list() {
+  local d j pid tty started
+  printf '  %-12s  %-19s  %-6s  %-8s  %s\n' ID STARTED FLAVOR TERMINAL PROJECT
+  for d in "${live[@]}"; do
+    j="$d/instance.json"
+    pid="$(jq -r '.pid // empty' "$j" 2>/dev/null)"
+    tty=""
+    [[ "$pid" =~ ^[0-9]+$ ]] && tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
+    started="$(jq -r '.started // empty' "$j" 2>/dev/null)"
+    [ -n "$started" ] && started="$(date -d "$started" '+%F %T' 2>/dev/null || echo "$started")"
+    printf '  %-12s  %-19s  %-6s  %-8s  %s\n' "$(basename "$d")" "${started:--}" \
+      "$(jq -r '.flavor // "-"' "$j" 2>/dev/null)" "${tty:--}" "$(jq -r '.work // "-"' "$j" 2>/dev/null)"
+  done
+}
+
+if [ "$list" = 1 ]; then
+  [ -n "$target" ] && usage
+  if [ "${#live[@]}" = 0 ]; then echo "microvm-stop: no running launches under $vms"; else list; fi
+  exit 0
+fi
 if [ -z "$target" ]; then
   case "${#live[@]}" in
     0) echo "microvm-stop: no running launches under $vms" >&2; exit 1 ;;
     1) dir="${live[0]}" ;;
     *)
       echo "microvm-stop: ${#live[@]} launches are running; name one:" >&2
-      for d in "${live[@]}"; do
-        printf '  %s  %s\n' "$(basename "$d")" "$(jq -r .work "$d/instance.json" 2>/dev/null)" >&2
-      done
+      list >&2
       exit 1 ;;
   esac
 elif [ -d "$target" ] && [ -f "$target/instance.json" ]; then

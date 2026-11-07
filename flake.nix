@@ -75,7 +75,7 @@
       # under the same root. See scripts/microvm-stop.sh.
       mkMicrovmStop = pkgs: pkgs.writeShellApplication {
         name = "microvm-stop";
-        runtimeInputs = with pkgs; [ coreutils gnugrep jq socat util-linux ];
+        runtimeInputs = with pkgs; [ coreutils gnugrep jq procps socat util-linux ];
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
