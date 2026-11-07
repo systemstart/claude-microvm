@@ -149,6 +149,35 @@ in
   # agent home cannot see or overwrite each other's. Read-only options: the
   # launcher's share, the guest services that read the files and microvm-policy's
   # stateFile all have to agree on them.
+  # Host directories a downstream flake adds to the guest, beside /work and
+  # agent home. Declared here, at build time, because QEMU's devices and the
+  # guest's mounts are; the launcher takes each one's host directory at launch
+  # from SHARE_<NAME> (the name upper-cased, `-` as `_`) and serves it with a
+  # virtiofsd of its own, --readonly unless readOnly is false. README
+  # "Extra shares".
+  options.claude-vm.shares = lib.mkOption {
+    type = lib.types.attrsOf (lib.types.submodule {
+      options = {
+        mountPoint = lib.mkOption {
+          type = lib.types.str;
+          description = "Where the guest mounts it.";
+        };
+        readOnly = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Whether the guest is refused writes (virtiofsd --readonly, which
+            holds against root in the guest, and an `ro` mount). false lets the
+            guest write the host directory.
+          '';
+        };
+      };
+    });
+    default = { };
+    example = lib.literalExpression ''{ audit-out = { mountPoint = "/audit-out"; readOnly = false; }; }'';
+    description = "Extra host directories shared into the guest, each named by its attribute.";
+  };
+
   options.claude-vm.instance = {
     dir = lib.mkOption {
       type = lib.types.str;
@@ -229,7 +258,15 @@ in
           proto = "virtiofs";
           readOnly = true;
         }
-      ];
+      ] ++ lib.mapAttrsToList (name: s: {
+        # The tag is what the launcher finds the share's socket by
+        # (<hostname>-virtiofs-share-<name>.sock); the source is not used,
+        # since the launcher runs the virtiofsd itself.
+        tag = "share-${name}";
+        source = "/tmp/${cfg.name}-vm-share-${name}";
+        inherit (s) mountPoint readOnly;
+        proto = "virtiofs";
+      }) config.claude-vm.shares;
 
       # Use virtio-console (hvc0) instead of serial (ttyS0) for the
       # interactive console.  virtio batches data in shared-memory buffers,
@@ -246,7 +283,40 @@ in
 
     # microvm.nix mounts every virtiofs share with `defaults`, whatever its
     # readOnly says, and `defaults` includes `rw` — so `ro` goes after it.
-    fileSystems.${instance.dir}.options = lib.mkAfter [ "ro" ];
+    fileSystems = lib.mkMerge ([ { ${instance.dir}.options = lib.mkAfter [ "ro" ]; } ]
+      ++ lib.mapAttrsToList (_: s: { ${s.mountPoint}.options = lib.mkAfter [ "ro" ]; })
+           (lib.filterAttrs (_: s: s.readOnly) config.claude-vm.shares));
+
+    # A name becomes a virtiofs tag (36 bytes at most), a unit and a socket
+    # name — the latter under the 107-byte socket path limit — and SHARE_<NAME>;
+    # a mount point must not take over a path the VM itself mounts.
+    assertions = lib.flatten (lib.mapAttrsToList (name: s: [
+      {
+        assertion = builtins.match "[a-z0-9][a-z0-9-]{0,15}" name != null;
+        message = "claude-vm.shares.${name}: a share name is 1-16 of a-z, 0-9 and -, starting with a letter or digit";
+      }
+      {
+        # The checks below compare mount points as strings, which holds only
+        # for one spelling per path: /data/. is /data to systemd, /./work is
+        # /work.
+        assertion = builtins.match "(/[^/]+)+" s.mountPoint != null
+          && !(lib.any (c: c == "." || c == "..") (lib.splitString "/" s.mountPoint));
+        message = "claude-vm.shares.${name}: mountPoint '${s.mountPoint}' must be canonical: absolute, with no empty, . or .. component and no trailing /";
+      }
+      {
+        assertion = lib.hasPrefix "/" s.mountPoint
+          && !(lib.any (p: s.mountPoint == p || lib.hasPrefix "${p}/" s.mountPoint || lib.hasPrefix "${s.mountPoint}/" p)
+                 [ "/work" "/home/agent" instance.dir "/nix" ])
+          && !(lib.elem s.mountPoint [ "/" "/run" "/etc" "/var" "/usr" "/tmp" ]);
+        message = "claude-vm.shares.${name}: mountPoint '${s.mountPoint}' must be an absolute path clear of /work, /home/agent, ${instance.dir}, /nix and the system's own directories";
+      }
+    ]) config.claude-vm.shares)
+    # One fileSystems entry per mount point: of two shares on one, only the
+    # later would be mounted.
+    ++ (let mps = lib.mapAttrsToList (_: s: s.mountPoint) config.claude-vm.shares; in [ {
+      assertion = lib.length mps == lib.length (lib.unique mps);
+      message = "claude-vm.shares: two shares cannot have the same mountPoint (${lib.concatStringsSep ", " (lib.filter (m: lib.count (x: x == m) mps > 1) (lib.unique mps))})";
+    } ]);
 
     users.groups.agent.gid = 1000;
     users.users.agent = {

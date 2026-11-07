@@ -79,7 +79,7 @@
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { } }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -103,6 +103,10 @@
           # names only — values never appear anywhere near a terminal.
           contractKeyChecks = lib.concatStringsSep "\n" (map (var: ''
             if [ -n "''${${var}:-}" ]; then _CONTRACT_KEYS="$_CONTRACT_KEYS ${var}"; fi'') apiKeyVars);
+          # claude-vm.shares, in a fixed order the bash arrays below share.
+          sharesList = lib.imap0 (i: s: s // { idx = i; var = "SHARE_" + lib.toUpper (lib.replaceStrings [ "-" ] [ "_" ] s.name); })
+            (lib.mapAttrsToList (name: s: s // { inherit name; }) shares);
+          shareArray = f: "(${lib.concatMapStringsSep " " (s: lib.escapeShellArg (f s)) sharesList})";
           egressGuestEnv = lib.concatMapStringsSep "\n" (ep: ''
             echo "${ep.baseUrlVar}=http://${egressGuestAddr}${ep.prefix}" >> "$INSTANCE_ENV"
             if [ -n "''${${ep.keyVar}:-}" ]; then
@@ -113,6 +117,52 @@
             fi'') flavorEndpoints;
           launcher = pkgs.writeShellScriptBin "microvm-run" ''
         set -euo pipefail
+        # --- Launch record (LAUNCH_RECORD): where it may go ---
+        # What this launch ran with, as JSON, for whatever drove it — written
+        # just before boot, completed at exit; see README "Launch record".
+        # Checked first of all, before anything else can refuse to start,
+        # because an earlier launch's record at the path is removed here: a
+        # launch that never boots must not leave the last one's standing for
+        # its own. And checked before that removal, so a path that is refused
+        # loses nothing. Paths are compared canonical (-m: nothing need exist
+        # yet), so a symlinked parent is followed to where the file would be.
+        #
+        # Evidence, so nowhere the guest can write — the work share, this
+        # launcher's state, agent home, a writable share — and in a directory
+        # only this user can write, so no one else can swap the file or plant
+        # one in its place.
+        _RECORD=""
+        if [ -n "''${LAUNCH_RECORD:-}" ]; then
+          _RECORD="$(realpath -m "$LAUNCH_RECORD")"
+          _GUEST_WRITES=("$(realpath -m "''${WORK_DIR:-$(pwd)}")" "$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")")
+          if [ -n "''${AGENT_HOME:-}" ]; then _GUEST_WRITES+=("$(realpath -m "$AGENT_HOME")"); fi
+          for _v in ${lib.concatMapStringsSep " " (s: s.var) (lib.filter (s: !s.readOnly) sharesList)}; do
+            if [ -n "''${!_v:-}" ]; then _GUEST_WRITES+=("$(realpath -m "''${!_v}")"); fi
+          done
+          for _g in "''${_GUEST_WRITES[@]}"; do
+            case "$_RECORD" in "''${_g%/}"/*)
+              echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is inside $_g, which the guest can write" >&2
+              exit 1 ;;
+            esac
+          done
+          _RECORD_DIR="$(dirname "$_RECORD")"
+          if [ ! -d "$_RECORD_DIR" ]; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $_RECORD_DIR is not a directory" >&2
+            exit 1
+          fi
+          if [ -z "$(find "$_RECORD_DIR" -maxdepth 0 -user "$(id -u)" ! -perm /022)" ]; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD: $_RECORD_DIR must be yours and writable by no one else" >&2
+            exit 1
+          fi
+          if [ -L "$LAUNCH_RECORD" ] || { [ -e "$_RECORD" ] && [ ! -f "$_RECORD" ]; }; then
+            echo "error: LAUNCH_RECORD=$LAUNCH_RECORD is not a regular file" >&2
+            exit 1
+          fi
+          if ! rm -f "$_RECORD" 2>/dev/null; then
+            echo "error: cannot write LAUNCH_RECORD=$LAUNCH_RECORD: the earlier record cannot be removed" >&2
+            exit 1
+          fi
+        fi
         WORK="$(realpath "''${WORK_DIR:-$(pwd)}")"
         # Derive project basename for host-visible identifiers
         WORK_BASENAME="$(basename "$WORK" | tr -cd 'a-zA-Z0-9_-' | head -c 12)"
@@ -197,6 +247,20 @@
 
         VM_MEM="''${VM_MEM:-${toString defaultMem}}"
         VM_VCPU="''${VM_VCPU:-${toString defaultVcpu}}"
+        # A wall-clock limit on the VM: when it is up, the power button, and
+        # QEMU's quit if the guest has not gone VM_TIMEOUT_GRACE later — see
+        # "Wall-clock limit" below. Seconds, or with an s/m/h suffix; 0 is none.
+        VM_TIMEOUT="''${VM_TIMEOUT:-0}"
+        VM_TIMEOUT_GRACE="''${VM_TIMEOUT_GRACE:-60}"
+        _seconds () { case "$1" in *h) echo $(( 10#''${1%h} * 3600 )) ;; *m) echo $(( 10#''${1%m} * 60 )) ;; *s) echo $(( 10#''${1%s} )) ;; *) echo $(( 10#$1 )) ;; esac; }
+        for _v in VM_TIMEOUT VM_TIMEOUT_GRACE; do
+          if ! [[ "''${!_v}" =~ ^[0-9]+[smh]?$ ]]; then
+            echo "error: $_v must be seconds, or a number with s, m or h (got '$(printf '%s' "''${!_v}")')" >&2
+            exit 1
+          fi
+        done
+        _TIMEOUT_S="$(_seconds "$VM_TIMEOUT")"
+        _GRACE_S="$(_seconds "$VM_TIMEOUT_GRACE")"
         CRI_STORAGE_SIZE="''${CRI_STORAGE_SIZE:-${toString defaultCriSize}}"
         ${lib.optionalString storeDiskBacked ''VM_STORE_SIZE="''${VM_STORE_SIZE:-${toString defaultStoreSize}}"''}
         RUNTIME="''${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -286,6 +350,8 @@
         # for lying inside the work share: a project beside ~/.my-agent-home
         # is inside that parent ($HOME) and is no overlap.
         _DATA_DIR="$(realpath -m "''${XDG_DATA_HOME:-$HOME/.local/share}/${dataDirName}")"
+        # Every launch's instance dir, its guest/env with API keys among them.
+        _RUNTIME_ROOT="$(realpath -m "$RUNTIME/claude-microvm")"
         _STATE_IN=("$_DATA_DIR")
         if [ -n "''${AGENT_HOME:-}" ]; then _STATE_IN+=("$(dirname "$(realpath -m "$AGENT_HOME")")"); fi
         # "" for WORK=/, so that "$_W"/* matches every absolute path.
@@ -302,6 +368,49 @@
           fi
           echo "warning: $_OVERLAP: the guest can write this launcher's state through the work share (agent homes, egress logs)" >&2
         fi
+        # The runtime root holds every running launch's env file, API keys and
+        # all: a work share overlapping it would hand them to this guest. Not
+        # one layout anyone relied on, so refused whatever the mode.
+        case "$_RUNTIME_ROOT/" in "$_W"/*) echo "error: WORK_DIR=$WORK contains $_RUNTIME_ROOT, where every launch keeps its env file and API keys" >&2; exit 1 ;; esac
+        case "$_W/" in "$_RUNTIME_ROOT"/*) echo "error: WORK_DIR=$WORK is inside $_RUNTIME_ROOT, where every launch keeps its env file and API keys" >&2; exit 1 ;; esac
+        # --- Extra shares (claude-vm.shares) ---
+        # The guest declares them, so QEMU expects each one's socket: each must
+        # be given its host directory, SHARE_<NAME>, or the VM could not start.
+        # None may overlap this launcher's state, either way, read-only or not:
+        # agent homes hold other projects' sign-ins, and the egress logs are
+        # the guest's own record.
+        _SHARE_NAMES=${shareArray (s: s.name)}
+        _SHARE_VARS=${shareArray (s: s.var)}
+        _SHARE_RO=${shareArray (s: if s.readOnly then "1" else "0")}
+        _SHARE_MP=${shareArray (s: s.mountPoint)}
+        _SHARE_HOST=()
+        # What a share may not lie inside: the data dir and the runtime root,
+        # and an explicit AGENT_HOME with the siblings beside it.
+        _STATE_INSIDE=("$_DATA_DIR" "$_RUNTIME_ROOT")
+        if [ -n "''${AGENT_HOME:-}" ]; then
+          _a="$(realpath -m "$AGENT_HOME")"
+          _STATE_INSIDE+=("$_a" "$_a-egress" "$_a-cri" "$_a-store")
+        fi
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _v="''${_SHARE_VARS[$_i]}"
+          _h="''${!_v:-}"
+          if [ -z "$_h" ]; then
+            echo "error: this VM shares a host directory at ''${_SHARE_MP[$_i]} (share ''${_SHARE_NAMES[$_i]}): set $_v=<host dir>" >&2
+            exit 1
+          fi
+          if [ ! -d "$_h" ]; then
+            echo "error: $_v=$_h is not a directory" >&2
+            exit 1
+          fi
+          _h="$(realpath "$_h")"
+          for _s in "''${_STATE_IN[@]}" "$_RUNTIME_ROOT"; do
+            case "$_s/" in "''${_h%/}"/*) echo "error: $_v=$_h contains $_s, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          done
+          for _s in "''${_STATE_INSIDE[@]}"; do
+            case "''${_h%/}/" in "$_s"/*) echo "error: $_v=$_h is inside $_s, this launcher's state; share a directory clear of it" >&2; exit 1 ;; esac
+          done
+          _SHARE_HOST+=("$_h")
+        done
         # virtiofsd's --cache policy for the /work share; the agent-home share
         # keeps the default. See README "Work share caching".
         WORK_CACHE="''${WORK_CACHE:-auto}"
@@ -407,13 +516,18 @@
         AGENT_UNIT="$UNIT_STEM-agent-home"
         GUEST_SOCK="$_INSTANCE_PATH/guest.sock"
         GUEST_UNIT="$UNIT_STEM-guest"
+        _SHARE_SOCK=() _SHARE_UNIT=()
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _SHARE_SOCK+=("$_INSTANCE_PATH/share-''${_SHARE_NAMES[$_i]}.sock")
+          _SHARE_UNIT+=("$UNIT_STEM-share-''${_SHARE_NAMES[$_i]}")
+        done
         # sun_path is 108 bytes, NUL included. The longest default is
         # /run/user/<uid>/claude-microvm/vms/<id>/agent-home.sock, 62 bytes for
         # a 4-digit uid, leaving room for longer uids and runtime dirs;
         # tests/instance-share.nix checks a 7-digit uid's. A
         # runtime dir long enough to break it would otherwise surface as QEMU
         # or virtiofsd failing to bind, after the daemons before it had started.
-        for _s in "$QMP_SOCK" "$SOCK" "$AGENT_SOCK" "$GUEST_SOCK"; do
+        for _s in "$QMP_SOCK" "$SOCK" "$AGENT_SOCK" "$GUEST_SOCK" "''${_SHARE_SOCK[@]}"; do
           if [ "''${#_s}" -gt 107 ]; then
             echo "error: socket path too long (''${#_s} bytes, the limit is 107): $_s" >&2
             echo "       it is under XDG_RUNTIME_DIR=$RUNTIME; a shorter one avoids this" >&2
@@ -435,6 +549,9 @@
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$GUEST_UNIT" 2>/dev/null || true
+          for _u in "''${_SHARE_UNIT[@]}"; do
+            ${pkgs.systemd}/bin/systemctl --user stop "$_u" 2>/dev/null || true
+          done
           if [ -n "$EGRESS_UNIT" ]; then
             ${pkgs.systemd}/bin/systemctl --user stop "$EGRESS_UNIT" 2>/dev/null || true
           fi
@@ -585,7 +702,17 @@
         # the shadow/enforce proxy), and is null otherwise.
         _EGRESS_UNIT_NAME=""
         case "$EGRESS_POLICY" in alert|shadow|enforce) _EGRESS_UNIT_NAME="$UNIT_STEM-egress" ;; esac
+        _SHARES_JSON="[]"
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _SHARES_JSON="$(${pkgs.jq}/bin/jq -c \
+            --arg name "''${_SHARE_NAMES[$_i]}" --arg host "''${_SHARE_HOST[$_i]}" --arg guest "''${_SHARE_MP[$_i]}" \
+            --argjson readOnly "$([ "''${_SHARE_RO[$_i]}" = 1 ] && echo true || echo false)" \
+            --arg socket "''${_SHARE_SOCK[$_i]}" --arg unit "''${_SHARE_UNIT[$_i]}" \
+            '. + [{name: $name, host: $host, guest: $guest, readOnly: $readOnly, socket: $socket, unit: $unit}]' <<< "$_SHARES_JSON")"
+        done
         ${pkgs.jq}/bin/jq -n \
+          --argjson shares "$_SHARES_JSON" \
+          --argjson timeout "$_TIMEOUT_S" --argjson timeoutGrace "$_GRACE_S" \
           --argjson pid "$$" --arg flavor ${lib.escapeShellArg agentName} \
           --arg vmId "$VM_ID" --arg id "$ID" --arg started "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --arg work "$WORK" --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" --arg guest "$INSTANCE_GUEST" \
@@ -596,6 +723,8 @@
           '{version: 1, pid: $pid, flavor: $flavor, vmId: $vmId, id: $id, started: $started,
             work: $work, agentHome: $agentHome, agentHomeMode: $agentHomeMode, guest: $guest, guestMount: "/run/microvm",
             egressPolicy: $egressPolicy,
+            shares: $shares,
+            timeout: (if $timeout == 0 then null else {seconds: $timeout, graceSeconds: $timeoutGrace} end),
             sockets: {qmp: $qmp, work: $workSock, agentHome: $agentHomeSock, guest: $guestSock},
             slice: $slice,
             units: {scope: (if $scopeUnit == "" then null else $scopeUnit end), work: $workUnit, agentHome: $agentHomeUnit, guest: $guestUnit,
@@ -1113,6 +1242,34 @@ EOF
         done
         [ -S "$GUEST_SOCK" ] || { echo "error: guest-share virtiofsd socket did not appear"; exit 1; }
 
+        # --- Extra shares (virtiofsd each) ---
+        # As agent home's, files shown as the agent's; --readonly unless the
+        # guest declared the share writable, which holds against root in the
+        # guest as it does for the guest share.
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          _RO_ARGS=()
+          [ "''${_SHARE_RO[$_i]}" = 1 ] && _RO_ARGS=(--readonly)
+          ${pkgs.systemd}/bin/systemd-run --user --unit="''${_SHARE_UNIT[$_i]}" --collect "''${_UNIT_PROPS[@]}" \
+            "$(describe "virtiofsd for share ''${_SHARE_NAMES[$_i]} ($([ "''${_SHARE_RO[$_i]}" = 1 ] && echo read-only || echo read-write)) → ''${_SHARE_MP[$_i]}")" \
+            -- ${virtiofsd}/bin/virtiofsd \
+              --socket-path="''${_SHARE_SOCK[$_i]}" \
+              --shared-dir="''${_SHARE_HOST[$_i]}" \
+              "''${_RO_ARGS[@]}" \
+              --sandbox=namespace \
+              --uid-map ":0:$(id -u):1:" \
+              --gid-map ":0:$(id -g):1:" \
+              --translate-uid "map:1000:0:1" \
+              --translate-gid "map:1000:0:1" \
+              --socket-group="$(id -gn)"
+        done
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          for i in $(seq 1 50); do
+            [ -S "''${_SHARE_SOCK[$_i]}" ] && break
+            sleep 0.1
+          done
+          [ -S "''${_SHARE_SOCK[$_i]}" ] || { echo "error: virtiofsd socket for share ''${_SHARE_NAMES[$_i]} did not appear"; exit 1; }
+        done
+
         # $CRI_IMG is used as sed replacement text below. Escape characters
         # that are special on the replacement side (\, &) and the | delimiter
         # so a path with such characters can't corrupt the generated command.
@@ -1131,6 +1288,8 @@ EOF
           -e "s|${hostname}-virtiofs-agent-home.sock|$AGENT_SOCK|g"
           -e "s|/tmp/${hostname}-instance|$INSTANCE_GUEST|g"
           -e "s|${hostname}-virtiofs-instance.sock|$GUEST_SOCK|g"
+          ${lib.concatMapStrings (s: ''-e "s|${hostname}-virtiofs-share-${s.name}.sock|''${_SHARE_SOCK[${toString s.idx}]}|g"
+          '') sharesList}
           # QEMU's QMP socket: microvm.socket is a relative "<hostname>.sock",
           # which would land in whatever directory the launcher runs from, and
           # two launches from one directory would take it from each other.
@@ -1260,6 +1419,15 @@ EOF
         if [ -f "$INSTANCE_GUEST/nix-db.sqlite" ]; then _GUEST_HOLDS="$_GUEST_HOLDS, nix DB snapshot"; fi
         _row "guest share" ok "this launch only → /run/microvm, read-only to the guest"
         _cont "$_GUEST_HOLDS; removed when the launch ends"
+        for _i in "''${!_SHARE_NAMES[@]}"; do
+          if [ "''${_SHARE_RO[$_i]}" = 1 ]; then
+            _row share ok "$(_tilde "''${_SHARE_HOST[$_i]}") → ''${_SHARE_MP[$_i]}, read-only to the guest"
+          else
+            _row share warn "$(_tilde "''${_SHARE_HOST[$_i]}") → ''${_SHARE_MP[$_i]}, read-write"
+            _cont "the guest's writes land on the host"
+          fi
+          _hint "''${_SHARE_NAMES[$_i]}, from ''${_SHARE_VARS[$_i]}"
+        done
         if [ "''${DIRENV_ALLOW:-0}" = "1" ]; then
           _row "dev shell" bad "loaded from the project — its Nix code is evaluated on the HOST"
         else
@@ -1323,6 +1491,9 @@ EOF
           _row containers "" "off"
         fi
         _row resources "" "''${VM_MEM} MiB RAM · $VM_VCPU vCPUs${lib.optionalString storeDiskBacked " · writable store \${VM_STORE_SIZE} MiB, fresh each boot"}"
+        if [ "$_TIMEOUT_S" -gt 0 ]; then
+          _cont "wall-clock limit $VM_TIMEOUT: then the power button, and quit $VM_TIMEOUT_GRACE later"
+        fi
         # The handle on this launch from outside the VM: its units, its slice,
         # its journal tag and its instance dir all carry the ID.
         _row launch "" "$ID · $INSTANCE_DIR/"
@@ -1347,9 +1518,107 @@ EOF
           read -r -p "press Enter to boot (NO_PAUSE=1 to skip this) … " _ || true
         fi
 
+        # The launch record, as of boot. Names only, never values, as in the
+        # contract. Written whole: a file of its own, made owner-only and new
+        # by mktemp (never one that was there before), renamed into place.
+        # Fails, leaving no temporary file, on any error: the caller decides
+        # what a record it could not write means.
+        _record_write () { # json
+          local tmp
+          [ -n "$1" ] || return 1
+          tmp="$(mktemp "$_RECORD.XXXXXX" 2>/dev/null)" || return 1
+          if ! { printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$_RECORD"; } 2>/dev/null; then
+            rm -f "$tmp"
+            return 1
+          fi
+        }
+        _RECORD_JSON=""
+        if [ -n "$_RECORD" ]; then
+          # Split on spaces only: set -f, in a subshell of its own, keeps a deny
+          # such as *.example.org from matching files.
+          _words () ( set -f; ${pkgs.jq}/bin/jq -cn '$ARGS.positional' --args $1 )
+          _DENY_WORDS="''${EGRESS_DENY:-}"; _DENY_WORDS="''${_DENY_WORDS//,/ }"
+          _ALLOW_SHA=""
+          if [ -n "$_EGRESS_ALLOWLIST_FILE" ] && [ -f "$_EGRESS_ALLOWLIST_FILE" ]; then
+            _ALLOW_SHA="$(sha256sum "$_EGRESS_ALLOWLIST_FILE" | cut -d' ' -f1)"
+          fi
+          _RECORD_JSON="$(${pkgs.jq}/bin/jq -cn \
+            --arg id "$ID" --arg flavor ${lib.escapeShellArg agentName} --arg booted "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg work "$WORK" --arg workspaceMode "$WORKSPACE_MODE" --arg guard "''${WORKSPACE_GUARD:-}" \
+            --arg agentHome "$AGENT_DIR" --arg agentHomeMode "$AGENT_HOME_MODE" \
+            --argjson shares "$_SHARES_JSON" \
+            --argjson timeout "$_TIMEOUT_S" --argjson grace "$_GRACE_S" \
+            --arg mem "$VM_MEM" --arg vcpu "$VM_VCPU" \
+            --arg policy "$EGRESS_POLICY" --arg builtin "$EGRESS_BUILTIN" \
+            --argjson deny "$(_words "$_DENY_WORDS")" \
+            --arg allowlist "$_EGRESS_ALLOWLIST_FILE" --arg allowlistSha256 "$_ALLOW_SHA" --arg auditLog "$EGRESS_AUDIT" \
+            --argjson endpoints ${lib.escapeShellArg (builtins.toJSON (map (ep: { inherit (ep) prefix upstream allowedPaths; }) flavorEndpoints))} \
+            --argjson keys "$(_words "$_CONTRACT_KEYS")" --argjson extraEnv "$(_words "$_CONTRACT_EXTRA")" \
+            --arg direnv "''${DIRENV_ALLOW:-0}" \
+            '{version: 1, id: $id, flavor: $flavor, booted: $booted,
+              workspace: {dir: $work, mode: $workspaceMode, guard: ($guard == "1")},
+              agentHome: {dir: $agentHome, mode: $agentHomeMode},
+              shares: $shares,
+              timeout: (if $timeout == 0 then null else {seconds: $timeout, graceSeconds: $grace} end),
+              resources: {memMiB: ($mem | tonumber? // $mem), vcpus: ($vcpu | tonumber? // $vcpu)},
+              egress: {policy: $policy, builtinAllowlists: ($builtin == "1"), deny: $deny,
+                       allowlist: (if $allowlist == "" then null else {file: $allowlist, sha256: $allowlistSha256} end),
+                       auditLog: (if $auditLog == "" then null else $auditLog end),
+                       endpoints: (if ($policy == "shadow" or $policy == "enforce") then $endpoints else [] end)},
+              env: {apiKeys: $keys, extraEnv: $extraEnv, devShellFromHost: ($direnv == "1")},
+              ended: null}')"
+          # Evidence the launch cannot give is a launch that should not run.
+          if ! _record_write "$_RECORD_JSON"; then
+            echo "error: cannot write LAUNCH_RECORD=$LAUNCH_RECORD" >&2
+            exit 1
+          fi
+        fi
+
+        # --- Wall-clock limit (VM_TIMEOUT) ---
+        # A watcher started with the VM, not a timer the launcher sleeps on: it
+        # holds the limit even if the launcher itself is killed outright, as
+        # long as QEMU runs. It stops as microvm-stop does — the power button,
+        # then quit after the grace — and leaves timed-out in the instance dir
+        # for the exit status. It closes its copies of the launch's locks, so
+        # they say when the VM has gone, and it then ends at once: it never
+        # keeps the scope, and with it the daemons, alive.
+        _TIMEOUT_PID=""
+        if [ "$_TIMEOUT_S" -gt 0 ]; then
+          (
+            trap - EXIT
+            exec {_INSTANCE_LOCK_FD}>&-
+            if [ -n "''${_EPHEMERAL_LOCK_FD:-}" ]; then exec {_EPHEMERAL_LOCK_FD}<&-; fi
+            _started=$SECONDS
+            while :; do
+              [ -e "$INSTANCE_DIR/lock" ] || exit 0
+              if ${pkgs.util-linux}/bin/flock -n "$INSTANCE_DIR/lock" true 2>/dev/null; then exit 0; fi
+              if [ $(( SECONDS - _started )) -ge "$_TIMEOUT_S" ]; then
+                : > "$INSTANCE_DIR/timed-out"
+                echo "VM_TIMEOUT: $VM_TIMEOUT is up — pressing the VM's power button" >&2
+                if ! ${mkMicrovmStop pkgs}/bin/microvm-stop --timeout "$_GRACE_S" "$INSTANCE_DIR" >/dev/null 2>&1; then
+                  echo "VM_TIMEOUT: still running $VM_TIMEOUT_GRACE later — stopping QEMU" >&2
+                  ${mkMicrovmStop pkgs}/bin/microvm-stop --force --timeout 30 "$INSTANCE_DIR" >/dev/null 2>&1 || true
+                fi
+                exit 0
+              fi
+              sleep 1
+            done
+          ) </dev/null &
+          _TIMEOUT_PID=$!
+        fi
+
         # Run QEMU with corrected paths
         _VM_RC=0
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run) || _VM_RC=$?
+        if [ -n "$_TIMEOUT_PID" ]; then
+          kill "$_TIMEOUT_PID" 2>/dev/null || true
+          # 124, as timeout(1) exits, so a caller can tell a run cut short
+          # from one that ended on its own.
+          if [ -e "$INSTANCE_DIR/timed-out" ]; then
+            echo "VM_TIMEOUT: the VM was stopped after $VM_TIMEOUT" >&2
+            _VM_RC=124
+          fi
+        fi
 
         case "$EGRESS_POLICY" in
           monitor|alert)
@@ -1397,6 +1666,23 @@ EOF
             echo "egress audit log saved: $EGRESS_AUDIT"
             ;;
         esac
+        # The record, completed: how the launch ended. A record whose `ended`
+        # is still null is one whose launcher never got here — killed.
+        # Failing to, the launch says so and does not exit 0 — but a VM status
+        # that is already non-zero (124, say) is the one it keeps.
+        if [ -n "$_RECORD" ]; then
+          _ENDED_JSON="$(${pkgs.jq}/bin/jq -c \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson status "$_VM_RC" \
+            --argjson timedOut "$([ -e "$INSTANCE_DIR/timed-out" ] && echo true || echo false)" \
+            --argjson allowed "''${_allow:-null}" --argjson denied "''${_deny:-null}" --argjson wouldDeny "''${_would:-null}" \
+            '.ended = {at: $at, exitStatus: $status, timedOut: $timedOut,
+                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end)}' \
+            <<< "$_RECORD_JSON")" || _ENDED_JSON=""
+          if ! _record_write "$_ENDED_JSON"; then
+            echo "warning: could not complete LAUNCH_RECORD=$LAUNCH_RECORD; it still says ended: null" >&2
+            [ "$_VM_RC" -ne 0 ] || _VM_RC=1
+          fi
+        fi
         exit "$_VM_RC"
       '';
         # microvm-stop beside microvm-run, so a launch can name it in its
@@ -1465,6 +1751,7 @@ EOF
           defaultCriSize = nixosCfg.claude-vm.cri.storageSize;
           storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
           defaultStoreSize = nixosCfg.claude-vm.store.size;
+          shares = nixosCfg.claude-vm.shares;
           # The session allowlist is assembled from these at launch, each line
           # tagged with its label so the session contract can show its source.
           egressAllowlistSources =
@@ -1555,6 +1842,18 @@ EOF
       # is not reachable from in there at all.
       checks = forSystems (system: let pkgs = nixpkgs.legacyPackages.${system}; in {
         module-hardening = import ./tests/module-hardening.nix { inherit pkgs; };
+        launch-record = import ./tests/launch-record.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
+        vm-timeout = import ./tests/vm-timeout.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+        };
+        extra-shares = import ./tests/extra-shares.nix {
+          inherit pkgs lib;
+          inherit (self.lib) mkRunner mkNixosConfig;
+        };
         downstream-api = import ./tests/downstream-api.nix {
           inherit pkgs lib;
           inherit (self.lib) flavors mkRunner;
