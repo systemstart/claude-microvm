@@ -542,7 +542,7 @@ It is written just before the VM boots and completed when the launch ends:
 | `shares`, `timeout`, `resources` | as in `instance.json`; memory and vCPUs as passed |
 | `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants (sealed modes) |
 | `env` | the names — never the values — of the API keys and `EXTRA_ENV` passed in, and `devShellFromHost` (`DIRENV_ALLOW=1`) |
-| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, and `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce) |
+| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
 
 A record whose `ended` is still `null` after the launcher has gone is one whose
 launcher was killed. A record already at the path is removed when the launcher
@@ -559,6 +559,27 @@ A record that cannot be written stops the launch before the VM boots: no
 evidence, no run. A record that cannot be completed at exit is reported on
 stderr and keeps `ended: null`; the launch then never exits 0 — a non-zero VM
 status (124, say) is kept, and a clean run exits 1.
+
+For a sealed run (`EGRESS_POLICY=shadow` or `enforce`) the launcher judges the
+audit log at exit with microvm-policy's `egress-report verdict`, prints its
+one-line verdict, and records it as `ended.egressVerdict`:
+
+```json
+{"outcome": "not-clean",
+ "summary": "egress verdict: NOT CLEAN — 1 decision(s) other than an allowed model-API request; 12 model-API request(s) allowed",
+ "details": ["1  deny connect evil.example.com:443"]}
+```
+
+`outcome` is `clean` only when every decision was an allowed request to a
+model-API endpoint — an allowed tunnel counts against the run as much as a
+denied one, and so does a shadow `would_deny`. Otherwise it is `not-clean`,
+`invalid` (a line in the log is not a proxy decision), `missing` (no log), or
+`error`; `details` names each other decision with its count. Only a run that
+keeps a record is judged — with the built-in allowlists on, an ordinary
+session is expected to use them — and the verdict never changes the exit
+status: what a run that is not clean means is up to whoever reads the record.
+For a run that should reach nothing but the model, launch with
+`EGRESS_POLICY=enforce EGRESS_BUILTIN=0`.
 
 ### Launch scope
 

@@ -8,7 +8,8 @@
 #     log, the model endpoints and their path grants, and the names (never
 #     the values) of the keys and EXTRA_ENV it passed — with `ended` null;
 #   - at exit `ended` has the exit status, whether VM_TIMEOUT cut it short,
-#     and the egress decision counts;
+#     and the egress decision counts, and for a sealed run the egress verdict
+#     (microvm-policy egress-report verdict): clean, not-clean, invalid;
 #   - a launch that fails before boot leaves no record, not even an earlier
 #     one; a killed launcher leaves `ended` null;
 #   - a path the guest can write, or that is not a regular file, is refused.
@@ -59,14 +60,37 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
     ! grep -q 'sk-secret-value\|bar-secret' $B && ok "...and no value of either" || bad "a secret value is in the record"
     [ "$(stat -c %a $R)" = 600 ] && ok "the record is owner-only" || bad "record mode $(stat -c %a $R)"
   else bad "no record at boot (started: $([ -e $TMPDIR/sealed/started ] && echo yes || echo no))"; cat $TMPDIR/sealed/out >&2; fi
+  # The guest tries a host off the allowlist: a decision as the proxy logs it.
+  deny_line='{"time":"t","level":"INFO","msg":"decision","kind":"connect","host":"evil.example.com","port":443,"path":"","decision":"deny","mode":"enforce"}'
+  printf '%s\n' "$deny_line" >> "$(jq -r .egress.auditLog $R)"
   touch $HOLD; wait
   if [ "$(cat $TMPDIR/sealed/rc)" = 0 ] && [ "$(jq -c '.ended | [.exitStatus, .timedOut, (.egressDecisions | type)]' $R)" = '[0,false,"object"]' ]; then
     ok "at exit ended has the exit status, timedOut false, and the egress decision counts"
   else bad "ended: $(jq -c .ended $R 2>/dev/null), rc $(cat $TMPDIR/sealed/rc)"; cat $TMPDIR/sealed/out >&2; fi
+  if [ "$(jq -r .ended.egressVerdict.outcome $R)" = not-clean ] \
+     && jq -r .ended.egressVerdict.summary $R | grep -q '^egress verdict: NOT CLEAN' \
+     && [ "$(jq -c .ended.egressVerdict.details $R)" = '["1  deny connect evil.example.com:443"]' ] \
+     && grep -q '^egress verdict: NOT CLEAN' $TMPDIR/sealed/out && [ "$(cat $TMPDIR/sealed/rc)" = 0 ]; then
+    ok "a sealed run with other egress is judged not clean, the decision named, the exit status untouched"
+  else bad "verdict: $(jq -c .ended.egressVerdict $R 2>/dev/null)"; grep -i verdict $TMPDIR/sealed/out >&2; fi
+
+  # --- the verdict: clean, unreadable, and none without a record --------------------------
+  launch clean LAUNCH_RECORD=$R EGRESS_POLICY=enforce EGRESS_BUILTIN=0 HOLD=$TMPDIR/release
+  [ "$(jq -r .ended.egressVerdict.outcome $R)" = clean ] && [ "$(jq -c .ended.egressVerdict.details $R)" = '[]' ] \
+    && ok "a sealed run with nothing but the model API is judged clean" || bad "clean verdict: $(jq -c .ended.egressVerdict $R 2>/dev/null)"
+  rm -f $TMPDIR/release2
+  launch garbled LAUNCH_RECORD=$R EGRESS_POLICY=shadow HOLD=$TMPDIR/release2 &
+  for _ in $(seq 1 300); do [ -e $TMPDIR/garbled/started ] && break; sleep 0.1; done
+  printf '{"time":"t","msg":"deci' >> "$(jq -r .egress.auditLog $R)"
+  touch $TMPDIR/release2; wait
+  [ "$(jq -r .ended.egressVerdict.outcome $R)" = invalid ] && [ "$(cat $TMPDIR/garbled/rc)" = 0 ] \
+    && ok "a truncated audit log is judged invalid, never clean" || bad "garbled verdict: $(jq -c .ended.egressVerdict $R 2>/dev/null)"
+  launch unrecorded EGRESS_POLICY=enforce EGRESS_BUILTIN=0 HOLD=$TMPDIR/release
+  ! grep -q 'egress verdict' $TMPDIR/unrecorded/out && ok "without a record no verdict is run" || bad "verdict printed without a record"
 
   # --- cut short, and open ------------------------------------------------------------
   launch short LAUNCH_RECORD=$R VM_TIMEOUT=1 VM_TIMEOUT_GRACE=2 QMP=1 HOLD=$TMPDIR/never
-  [ "$(jq -c '.ended | [.exitStatus, .timedOut, .egressDecisions]' $R)" = '[124,true,null]' ] \
+  [ "$(jq -c '.ended | [.exitStatus, .timedOut, .egressDecisions, .egressVerdict]' $R)" = '[124,true,null,null]' ] \
     && [ "$(jq -r .egress.policy $R)" = open ] && [ "$(jq -r .egress.allowlist $R)" = null ] \
     && ok "a launch VM_TIMEOUT cut short records 124 and timedOut; an open one, no allowlist or decisions" \
     || { bad "short/open record: $(jq -c '{egress, ended}' $R 2>/dev/null), rc $(cat $TMPDIR/short/rc)"; grep -v socat $TMPDIR/short/out | tail -25 >&2; }
