@@ -31,7 +31,7 @@
     # egress-report, and the generic allowlist. This flake keeps only the
     # consumer glue — the launcher and the agent-specific allowlists.
     microvm-policy = {
-      url = "github:systemstart/microvm-policy/v0.5.0";
+      url = "github:systemstart/microvm-policy/v0.6.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -56,8 +56,11 @@
       # token through when the var is unset on the host (OAuth mode).
       # allowedPaths is a per-host capability grant; shadow mode's audit log
       # is how it gets extended when a client needs more.
+      # usage names the proxy's token parser for the endpoint's responses
+      # (only "anthropic" exists): set, the session's tokens are counted, and
+      # API_BUDGET_TOKENS can cap them; unset, only requests are.
       egressEndpoints = rec {
-        claude = [ { prefix = "/anthropic"; upstream = "https://api.anthropic.com"; keyVar = "ANTHROPIC_API_KEY"; header = "x-api-key"; baseUrlVar = "ANTHROPIC_BASE_URL"; allowedPaths = [ "/v1/messages" ]; } ];
+        claude = [ { prefix = "/anthropic"; upstream = "https://api.anthropic.com"; keyVar = "ANTHROPIC_API_KEY"; header = "x-api-key"; baseUrlVar = "ANTHROPIC_BASE_URL"; allowedPaths = [ "/v1/messages" ]; usage = "anthropic"; } ];
         gemini = [ { prefix = "/gemini"; upstream = "https://generativelanguage.googleapis.com"; keyVar = "GEMINI_API_KEY"; header = "x-goog-api-key"; baseUrlVar = "GOOGLE_GEMINI_BASE_URL"; allowedPaths = [ "/v1beta/models" "/v1/models" ]; } ];
         codex  = [ { prefix = "/openai"; upstream = "https://api.openai.com"; keyVar = "OPENAI_API_KEY"; header = "authorization"; baseUrlVar = "OPENAI_BASE_URL"; allowedPaths = [ "/v1/responses" "/v1/chat/completions" "/v1/models" ]; } ];
         pi = claude ++ gemini ++ codex;
@@ -96,7 +99,16 @@
           egressEndpointJson = lib.concatMapStringsSep "\n" (ep: ''
             _EGRESS_EP_KEYENV=""
             if [ -n "''${${ep.keyVar}:-}" ]; then _EGRESS_EP_KEYENV="${ep.keyVar}"; fi
-            _EGRESS_EPS="$_EGRESS_EPS,{\"prefix\":\"${ep.prefix}\",\"upstream\":\"${ep.upstream}\",\"keyEnv\":\"$_EGRESS_EP_KEYENV\",\"header\":\"${ep.header}\",\"allowedPaths\":${lib.replaceStrings [ "\"" ] [ "\\\"" ] (builtins.toJSON ep.allowedPaths)}}"'') flavorEndpoints;
+            # The budget is per endpoint; its token cap only where the proxy
+            # can count tokens. Both limits are digits, checked up front.
+            _EGRESS_EP_BUDGET=""
+            _EGRESS_EP_TOKENS=${if ep ? usage then ''"$_EGRESS_BUDGET_TOKENS"'' else ''""''}
+            if [ -n "$_EGRESS_BUDGET_REQUESTS$_EGRESS_EP_TOKENS" ]; then
+              _EGRESS_EP_BUDGET=",\"budget\":{\"maxRequests\":''${_EGRESS_BUDGET_REQUESTS:-0},\"maxTokens\":''${_EGRESS_EP_TOKENS:-0}}"
+            fi
+            _EGRESS_EPS="$_EGRESS_EPS,{\"prefix\":\"${ep.prefix}\",\"upstream\":\"${ep.upstream}\",\"keyEnv\":\"$_EGRESS_EP_KEYENV\",\"header\":\"${ep.header}\",\"allowedPaths\":${lib.replaceStrings [ "\"" ] [ "\\\"" ] (builtins.toJSON ep.allowedPaths)}${lib.optionalString (ep ? usage) ",\\\"usage\\\":\\\"${ep.usage}\\\""}$_EGRESS_EP_BUDGET}"'') flavorEndpoints;
+          # The endpoints whose tokens the proxy can count.
+          egressMetered = lib.filter (ep: ep ? usage) flavorEndpoints;
           egressProxySetenv = lib.concatMapStringsSep "\n" (ep: ''
             if [ -n "''${${ep.keyVar}:-}" ]; then _EGRESS_SETENV+=("--setenv=${ep.keyVar}"); fi'') flavorEndpoints;
           # Session-contract fragment: which credential vars the host holds,
@@ -301,6 +313,30 @@
             open|monitor) echo "warning: EGRESS_BUILTIN is only read by EGRESS_POLICY=alert|shadow|enforce — ignored" >&2 ;;
           esac
         fi
+        # API_BUDGET_REQUESTS / API_BUDGET_TOKENS cap what the session may spend
+        # on each model-API endpoint; the shadow/enforce proxy refuses past
+        # them (403, audited over_budget). A spending limit asked for and not
+        # applied is worse than none, so outside those policies it is an error,
+        # not a warning.
+        for _v in API_BUDGET_REQUESTS API_BUDGET_TOKENS; do
+          if [ -n "''${!_v:-}" ] && ! [[ "''${!_v}" =~ ^[1-9][0-9]{0,17}$ ]]; then
+            echo "error: $_v must be a positive integer (got: ''${!_v})" >&2
+            exit 1
+          fi
+        done
+        if [ -n "''${API_BUDGET_REQUESTS:-}''${API_BUDGET_TOKENS:-}" ]; then
+          case "$EGRESS_POLICY" in
+            shadow|enforce) ;;
+            *)
+              echo "error: API_BUDGET_REQUESTS / API_BUDGET_TOKENS need EGRESS_POLICY=shadow|enforce: the egress proxy is what enforces them" >&2
+              exit 1 ;;
+          esac
+        fi
+        ${if egressMetered == [ ] then ''
+        if [ -n "''${API_BUDGET_TOKENS:-}" ]; then
+          echo "error: API_BUDGET_TOKENS: the egress proxy cannot count ${agentName}'s tokens (it reads only Anthropic's usage); API_BUDGET_REQUESTS caps it by requests" >&2
+          exit 1
+        fi'' else ""}
         if ! [[ "''${EGRESS_PCAP_MAXLEN:-4096}" =~ ^[0-9]+$ ]]; then
           echo "error: EGRESS_PCAP_MAXLEN must be an integer (captured bytes per packet)" >&2
           exit 1
@@ -425,6 +461,7 @@
         EGRESS_UNIT=""
         EGRESS_ALERTS=""
         EGRESS_AUDIT=""
+        EGRESS_USAGE=""
         _EGRESS_ALLOWLIST_FILE=""
         _EGRESS_PORTFILE=""
         _EGRESS_PROXY_CFG=""
@@ -842,6 +879,13 @@
             ln -sfn "$(basename "$EGRESS_AUDIT")" "$EGRESS_DIR/latest.audit.jsonl"
             _EGRESS_PORTFILE="$INSTANCE_DIR/egress.port"
             _EGRESS_PROXY_CFG="$INSTANCE_DIR/egress.json"
+            # What the session spent on the model API, per endpoint, rewritten
+            # by the proxy after every response; API_BUDGET_* caps it.
+            EGRESS_USAGE="$EGRESS_DIR/session-$_EGRESS_STAMP.usage.json"
+            ln -sfn "$(basename "$EGRESS_USAGE")" "$EGRESS_DIR/latest.usage.json"
+            _EGRESS_USAGE_FILE="$EGRESS_USAGE"
+            _EGRESS_BUDGET_REQUESTS="''${API_BUDGET_REQUESTS:-}"
+            _EGRESS_BUDGET_TOKENS="''${API_BUDGET_TOKENS:-}"
             _EGRESS_PROXY_MODE="enforce"
             [ "$EGRESS_POLICY" = "shadow" ] && _EGRESS_PROXY_MODE="log"
             # tests/egress-config.nix extracts the region between these
@@ -852,7 +896,7 @@
             _EGRESS_EPS=""
             ${egressEndpointJson}
             cat > "$_EGRESS_PROXY_CFG" <<EOF
-{"listen":"127.0.0.1:0","mode":"$_EGRESS_PROXY_MODE","allowlistFile":"$_EGRESS_ALLOWLIST_FILE","auditLog":"$EGRESS_AUDIT","portFile":"$_EGRESS_PORTFILE","endpoints":[''${_EGRESS_EPS#,}]}
+{"listen":"127.0.0.1:0","mode":"$_EGRESS_PROXY_MODE","allowlistFile":"$_EGRESS_ALLOWLIST_FILE","auditLog":"$EGRESS_AUDIT","portFile":"$_EGRESS_PORTFILE","usageFile":"$_EGRESS_USAGE_FILE","endpoints":[''${_EGRESS_EPS#,}]}
 EOF
             chmod 600 "$_EGRESS_PROXY_CFG"
             # END egress-proxy-config
@@ -1469,6 +1513,19 @@ EOF
               _row "credentials" ok "''${_CONTRACT_KEYS# } — placeholders in the guest, real keys stay with the proxy"
             else
               _row "credentials" "" "no API keys (OAuth passes through the proxy)"
+            fi
+            if [ -n "''${API_BUDGET_REQUESTS:-}''${API_BUDGET_TOKENS:-}" ]; then
+              _BUDGET_DESC=""
+              [ -n "''${API_BUDGET_REQUESTS:-}" ] && _BUDGET_DESC="$API_BUDGET_REQUESTS requests"
+              [ -n "''${API_BUDGET_TOKENS:-}" ] && _BUDGET_DESC="''${_BUDGET_DESC:+$_BUDGET_DESC, }$API_BUDGET_TOKENS tokens"
+              _row "api budget" ok "$_BUDGET_DESC per model endpoint — refused (403) past it"
+              ${lib.optionalString (egressMetered != [ ] && egressMetered != flavorEndpoints) ''
+              if [ -n "''${API_BUDGET_TOKENS:-}" ]; then
+                _cont "tokens counted on ${lib.concatMapStringsSep " " (ep: ep.prefix) egressMetered} only; the others by requests"
+              fi''}
+            else
+              _row "api budget" "" "none — the proxy records what the session spends"
+              _hint "API_BUDGET_TOKENS / API_BUDGET_REQUESTS cap it"
             fi ;;
           *)
             if [ -n "$_CONTRACT_KEYS" ]; then
@@ -1552,7 +1609,8 @@ EOF
             --arg policy "$EGRESS_POLICY" --arg builtin "$EGRESS_BUILTIN" \
             --argjson deny "$(_words "$_DENY_WORDS")" \
             --arg allowlist "$_EGRESS_ALLOWLIST_FILE" --arg allowlistSha256 "$_ALLOW_SHA" --arg auditLog "$EGRESS_AUDIT" \
-            --argjson endpoints ${lib.escapeShellArg (builtins.toJSON (map (ep: { inherit (ep) prefix upstream allowedPaths; }) flavorEndpoints))} \
+            --arg usageFile "$EGRESS_USAGE" --arg budgetRequests "''${API_BUDGET_REQUESTS:-}" --arg budgetTokens "''${API_BUDGET_TOKENS:-}" \
+            --argjson endpoints ${lib.escapeShellArg (builtins.toJSON (map (ep: { inherit (ep) prefix upstream allowedPaths; usage = ep.usage or null; }) flavorEndpoints))} \
             --argjson keys "$(_words "$_CONTRACT_KEYS")" --argjson extraEnv "$(_words "$_CONTRACT_EXTRA")" \
             --arg direnv "''${DIRENV_ALLOW:-0}" \
             '{version: 1, id: $id, flavor: $flavor, booted: $booted,
@@ -1564,6 +1622,9 @@ EOF
               egress: {policy: $policy, builtinAllowlists: ($builtin == "1"), deny: $deny,
                        allowlist: (if $allowlist == "" then null else {file: $allowlist, sha256: $allowlistSha256} end),
                        auditLog: (if $auditLog == "" then null else $auditLog end),
+                       usageFile: (if $usageFile == "" then null else $usageFile end),
+                       apiBudget: (if $budgetRequests == "" and $budgetTokens == "" then null
+                                   else {maxRequests: ($budgetRequests | tonumber? // null), maxTokens: ($budgetTokens | tonumber? // null)} end),
                        endpoints: (if ($policy == "shadow" or $policy == "enforce") then $endpoints else [] end)},
               env: {apiKeys: $keys, extraEnv: $extraEnv, devShellFromHost: ($direnv == "1")},
               ended: null}')"
@@ -1654,8 +1715,23 @@ EOF
             _allow=$(grep -c '"decision":"allow"' "$EGRESS_AUDIT" 2>/dev/null) || _allow=0
             _deny=$(grep -c '"decision":"deny"' "$EGRESS_AUDIT" 2>/dev/null) || _deny=0
             _would=$(grep -c '"decision":"would_deny"' "$EGRESS_AUDIT" 2>/dev/null) || _would=0
+            _over=$(grep -c '"decision":"over_budget"' "$EGRESS_AUDIT" 2>/dev/null) || _over=0
+            _over_s=""
+            if [ "$_over" -gt 0 ]; then _over_s=", $_over over budget"; fi
             echo
-            echo "egress ($EGRESS_POLICY): $_allow allowed, $_deny denied, $_would would-deny"
+            echo "egress ($EGRESS_POLICY): $_allow allowed, $_deny denied, $_would would-deny$_over_s"
+            # What the model API cost, per endpoint that saw any traffic.
+            if [ -f "$EGRESS_USAGE" ]; then
+              ${pkgs.jq}/bin/jq -r '.endpoints[] | select(.requests > 0 or .refused > 0)
+                | "api \(.prefix): \(.requests) requests"
+                  + (if .tokens then ", \(.tokens | add) tokens" else "" end)
+                  + (if .refused > 0 then ", \(.refused) refused" else "" end)
+                  + (if (.unknownUsage // 0) > 0 then ", \(.unknownUsage) of unknown cost" else "" end)
+                  + (if .exhausted then " — budget spent" else "" end)' "$EGRESS_USAGE" 2>/dev/null || true
+            fi
+            if [ "$_over" -gt 0 ]; then
+              echo "  $_over request(s) refused under the API budget (API_BUDGET_REQUESTS / API_BUDGET_TOKENS): $EGRESS_USAGE"
+            fi
             if [ "$_would" -gt 0 ]; then
               echo "  shadow found traffic enforce would block — the hosts are in the audit log:"
               echo "  grep would_deny '$EGRESS_AUDIT'"
@@ -1700,9 +1776,12 @@ EOF
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson status "$_VM_RC" \
             --argjson timedOut "$([ -e "$INSTANCE_DIR/timed-out" ] && echo true || echo false)" \
             --argjson allowed "''${_allow:-null}" --argjson denied "''${_deny:-null}" --argjson wouldDeny "''${_would:-null}" \
+            --argjson overBudget "''${_over:-null}" \
+            --rawfile apiUsage "$(if [ -n "$EGRESS_USAGE" ] && [ -f "$EGRESS_USAGE" ]; then echo "$EGRESS_USAGE"; else echo /dev/null; fi)" \
             --arg verdictOutcome "''${_VERDICT_OUTCOME:-}" --rawfile verdict "''${_VERDICT_FILE:-/dev/null}" \
             '.ended = {at: $at, exitStatus: $status, timedOut: $timedOut,
-                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end),
+                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny, overBudget: $overBudget} end),
+                       apiUsage: (($apiUsage | fromjson? | .endpoints) // null),
                        egressVerdict: (if $verdictOutcome == "" then null
                                        else ($verdict | split("\n")) as $l
                                             | {outcome: $verdictOutcome, summary: $l[0], details: ($l[1:] | map(select(. != "") | sub("^ +"; "")))} end)}' \
