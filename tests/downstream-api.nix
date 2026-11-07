@@ -32,6 +32,12 @@ let
 
   refused = r: !(builtins.tryEval (builtins.seq r.drvPath true)).success;
 
+  # A literal substring test. lib.hasInfix is builtins.match ".*<infix>.*",
+  # and some Nix builds (Determinate Nix, as CI installs it) match with a
+  # regex engine that recurses per character: on the ~100 KB launcher that
+  # overflows the evaluator's stack.
+  contains = needle: text: builtins.replaceStrings [ needle ] [ "" ] text != text;
+
   checks = [
     {
       name = "mkRunner without modules is packages.claude, derivation for derivation";
@@ -47,7 +53,7 @@ let
     }
     {
       name = "the guest's claude-vm.agent.mem becomes the launcher's VM_MEM default";
-      ok = lib.hasInfix ''VM_MEM="''${VM_MEM:-6144}"'' launcherText;
+      ok = contains ''VM_MEM="''${VM_MEM:-6144}"'' launcherText;
     }
     {
       name = "the runner carries its guest as nixosConfig";
