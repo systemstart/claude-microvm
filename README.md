@@ -674,10 +674,14 @@ Three things worth knowing before pointing this at code you don't trust:
   don't combine `DIRENV_ALLOW=1` with a `WORK_DIR` whose contents you wouldn't
   run on the host yourself.
 - **The guest can write workspace paths whose contents execute on the host
-  later** — `.git/hooks`, `.git/config`, `.mcp.json`, `.claude/commands`,
-  `.claude/agents`, `.envrc`. A compromised session that writes those persists
-  code past the VM teardown: it runs in the next host-side `git` invocation or
-  unsandboxed agent session. `WORKSPACE_GUARD=1` makes the ones that exist at
+  later** — `.git/hooks`, `.git/config`, the hook directories and managers a
+  `core.hooksPath` can point at (`.githooks`, `.husky`,
+  `.pre-commit-config.yaml`), `.mcp.json`, `.claude/commands`,
+  `.claude/agents`, `.claude/settings.json` and `.claude/settings.local.json`
+  (their hooks), `.vscode` (tasks), `.envrc`. A compromised session that
+  writes those persists code past the VM teardown: it runs in the next
+  host-side `git` commit or push, editor task, or unsandboxed agent session.
+  `WORKSPACE_GUARD=1` makes the ones that exist at
   boot read-only inside the guest (kernel-enforced bind mounts the agent user
   cannot undo). Opt-in for now because denial breaks a workflow this project
   itself uses — asking the agent to write a project skill or register an MCP
@@ -980,7 +984,7 @@ Rebuild with `make claude`.
 | `LAUNCH_RECORD` | File to write a JSON record of what the launch ran with, before boot, and how it ended, at exit — see [Launch record](#launch-record) | (none) |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `DIRENV_REEVAL` | Set to `1` to re-evaluate changed project Nix files on the host without the interactive prompt (see [Hardening notes](#hardening-notes)) | (prompt) |
-| `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.mcp.json`, `.claude/commands`, …) read-only inside the guest | (off) |
+| `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.githooks`, `.mcp.json`, `.claude/settings.json`, …) read-only inside the guest | (off) |
 | `WORKSPACE_MODE` | `passthrough` (edits appear on the host instantly) or `ephemeral` (guest-side overlay: writes stay in the VM, `vm-work-diff` lists them, all is discarded at poweroff) — see [Ephemeral workspace](#ephemeral-workspace) | `passthrough` |
 | `NO_PAUSE` | Set to `1` to boot immediately instead of waiting for Enter on the session contract (the contract still prints). **The wait is the default since v0.16.0**: set this for any automation that runs the launcher on a terminal (tmux, `expect`, `script`, IDE tasks). Already skipped when stdin is not a terminal (pipes, cron); a one-shot `AGENTS_ARGS=-p …` run from a terminal still waits | (pause) |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
