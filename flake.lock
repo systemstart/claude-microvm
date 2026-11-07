@@ -67,11 +67,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1791867576,
-        "narHash": "sha256-wQxH6+i+mPMDqP5XqjJIrDbaWHNQQCCCknq2j8M5S0E=",
+        "lastModified": 1793774382,
+        "narHash": "sha256-FbAHhkHJSREUBNegF3bOXtDyqzrAoIs6Aql1afo/cjE=",
         "owner": "purpleclay",
         "repo": "go-overlay",
-        "rev": "435cb15677acf4d75161566394b2cc44462fb5ed",
+        "rev": "390b41ddf587846a6932ebef355f6e9981dd78e9",
         "type": "github"
       },
       "original": {
@@ -109,16 +109,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1792023405,
-        "narHash": "sha256-flq1xS3Fbw3G213diiorX2paQt/+wff6+Ts3CXxLtHo=",
+        "lastModified": 1794058853,
+        "narHash": "sha256-fotPLu/4fqJCObBy9u21d1UE2YtJKm7+eUJb40D/T0c=",
         "owner": "systemstart",
         "repo": "microvm-policy",
-        "rev": "57140fb4ab6a7cb6f05be943b1e2e98badaa57d0",
+        "rev": "5040d459b764b50b30be3a14be83b2edf5f9cf42",
         "type": "github"
       },
       "original": {
         "owner": "systemstart",
-        "ref": "v0.3.0",
+        "ref": "v0.5.0",
         "repo": "microvm-policy",
         "type": "github"
       }

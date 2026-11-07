@@ -31,7 +31,7 @@
     # egress-report, and the generic allowlist. This flake keeps only the
     # consumer glue — the launcher and the agent-specific allowlists.
     microvm-policy = {
-      url = "github:systemstart/microvm-policy/v0.3.0";
+      url = "github:systemstart/microvm-policy/v0.5.0";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -1664,6 +1664,31 @@ EOF
               echo "  denied hosts and the way to allow them: grep '\"decision\":\"deny\"' '$EGRESS_AUDIT'"
             fi
             echo "egress audit log saved: $EGRESS_AUDIT"
+            # For a launch that keeps a record, the run judged: did anything
+            # but the model API leave, or try to? Evidence only — the exit
+            # status stays the VM's; whoever reads the record decides. Not
+            # for every session: the built-in allowlists exist to be used.
+            # Kept as a file beside the log it judges, and read from there into
+            # the record: its details grow with every distinct destination
+            # tried, past what one command-line argument may hold.
+            if [ -n "$_RECORD" ]; then
+              _VERDICT_FILE="$EGRESS_DIR/session-$_EGRESS_STAMP.verdict.txt"
+              _VERDICT_RC=0
+              ${egressReport}/bin/egress-report verdict "$EGRESS_AUDIT" > "$_VERDICT_FILE" 2>&1 || _VERDICT_RC=$?
+              case "$_VERDICT_RC" in
+                0) _VERDICT_OUTCOME=clean ;;
+                2) _VERDICT_OUTCOME=not-clean ;;
+                65) _VERDICT_OUTCOME=invalid ;;
+                66) _VERDICT_OUTCOME=missing ;;
+                *) _VERDICT_OUTCOME=error ;;
+              esac
+              if [ -f "$_VERDICT_FILE" ] && [ -r "$_VERDICT_FILE" ]; then
+                ln -sfn "$(basename "$_VERDICT_FILE")" "$EGRESS_DIR/latest.verdict.txt"
+                head -n 1 "$_VERDICT_FILE"
+              else
+                _VERDICT_FILE=""
+              fi
+            fi
             ;;
         esac
         # The record, completed: how the launch ended. A record whose `ended`
@@ -1675,8 +1700,12 @@ EOF
             --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson status "$_VM_RC" \
             --argjson timedOut "$([ -e "$INSTANCE_DIR/timed-out" ] && echo true || echo false)" \
             --argjson allowed "''${_allow:-null}" --argjson denied "''${_deny:-null}" --argjson wouldDeny "''${_would:-null}" \
+            --arg verdictOutcome "''${_VERDICT_OUTCOME:-}" --rawfile verdict "''${_VERDICT_FILE:-/dev/null}" \
             '.ended = {at: $at, exitStatus: $status, timedOut: $timedOut,
-                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end)}' \
+                       egressDecisions: (if $allowed == null then null else {allow: $allowed, deny: $denied, wouldDeny: $wouldDeny} end),
+                       egressVerdict: (if $verdictOutcome == "" then null
+                                       else ($verdict | split("\n")) as $l
+                                            | {outcome: $verdictOutcome, summary: $l[0], details: ($l[1:] | map(select(. != "") | sub("^ +"; "")))} end)}' \
             <<< "$_RECORD_JSON")" || _ENDED_JSON=""
           if ! _record_write "$_ENDED_JSON"; then
             echo "warning: could not complete LAUNCH_RECORD=$LAUNCH_RECORD; it still says ended: null" >&2

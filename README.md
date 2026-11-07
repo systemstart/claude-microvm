@@ -542,7 +542,7 @@ It is written just before the VM boots and completed when the launch ends:
 | `shares`, `timeout`, `resources` | as in `instance.json`; memory and vCPUs as passed |
 | `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants (sealed modes) |
 | `env` | the names — never the values — of the API keys and `EXTRA_ENV` passed in, and `devShellFromHost` (`DIRENV_ALLOW=1`) |
-| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, and `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce) |
+| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny` counts from the audit log; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
 
 A record whose `ended` is still `null` after the launcher has gone is one whose
 launcher was killed. A record already at the path is removed when the launcher
@@ -559,6 +559,29 @@ A record that cannot be written stops the launch before the VM boots: no
 evidence, no run. A record that cannot be completed at exit is reported on
 stderr and keeps `ended: null`; the launch then never exits 0 — a non-zero VM
 status (124, say) is kept, and a clean run exits 1.
+
+For a sealed run (`EGRESS_POLICY=shadow` or `enforce`) the launcher judges the
+audit log at exit with microvm-policy's `egress-report verdict`, prints its
+one-line verdict, keeps the whole of it beside the audit log
+(`session-<…>.verdict.txt`, `latest.verdict.txt`), and records it as
+`ended.egressVerdict`:
+
+```json
+{"outcome": "not-clean",
+ "summary": "egress verdict: NOT CLEAN — 1 decision(s) other than an allowed model-API request; 12 model-API request(s) allowed",
+ "details": ["1  deny connect evil.example.com:443"]}
+```
+
+`outcome` is `clean` only when every decision was an allowed request to a
+model-API endpoint — an allowed tunnel counts against the run as much as a
+denied one, and so does a shadow `would_deny`. Otherwise it is `not-clean`,
+`invalid` (a line in the log is not a proxy decision), `missing` (no log), or
+`error`; `details` names each other decision with its count. Only a run that
+keeps a record is judged — with the built-in allowlists on, an ordinary
+session is expected to use them — and the verdict never changes the exit
+status: what a run that is not clean means is up to whoever reads the record.
+For a run that should reach nothing but the model, launch with
+`EGRESS_POLICY=enforce EGRESS_BUILTIN=0`.
 
 ### Launch scope
 
@@ -653,10 +676,14 @@ Three things worth knowing before pointing this at code you don't trust:
   don't combine `DIRENV_ALLOW=1` with a `WORK_DIR` whose contents you wouldn't
   run on the host yourself.
 - **The guest can write workspace paths whose contents execute on the host
-  later** — `.git/hooks`, `.git/config`, `.mcp.json`, `.claude/commands`,
-  `.claude/agents`, `.envrc`. A compromised session that writes those persists
-  code past the VM teardown: it runs in the next host-side `git` invocation or
-  unsandboxed agent session. `WORKSPACE_GUARD=1` makes the ones that exist at
+  later** — `.git/hooks`, `.git/config`, the hook directories and managers a
+  `core.hooksPath` can point at (`.githooks`, `.husky`,
+  `.pre-commit-config.yaml`), `.mcp.json`, `.claude/commands`,
+  `.claude/agents`, `.claude/settings.json` and `.claude/settings.local.json`
+  (their hooks), `.vscode` (tasks), `.envrc`. A compromised session that
+  writes those persists code past the VM teardown: it runs in the next
+  host-side `git` commit or push, editor task, or unsandboxed agent session.
+  `WORKSPACE_GUARD=1` makes the ones that exist at
   boot read-only inside the guest (kernel-enforced bind mounts the agent user
   cannot undo). Opt-in for now because denial breaks a workflow this project
   itself uses — asking the agent to write a project skill or register an MCP
@@ -959,7 +986,7 @@ Rebuild with `make claude`.
 | `LAUNCH_RECORD` | File to write a JSON record of what the launch ran with, before boot, and how it ended, at exit — see [Launch record](#launch-record) | (none) |
 | `DIRENV_ALLOW` | Set to `1` to load the project's dev shell (flake.nix or devenv) into the agent's environment | `0` |
 | `DIRENV_REEVAL` | Set to `1` to re-evaluate changed project Nix files on the host without the interactive prompt (see [Hardening notes](#hardening-notes)) | (prompt) |
-| `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.mcp.json`, `.claude/commands`, …) read-only inside the guest | (off) |
+| `WORKSPACE_GUARD` | Set to `1` to make host-executed workspace config paths (`.git/hooks`, `.githooks`, `.mcp.json`, `.claude/settings.json`, …) read-only inside the guest | (off) |
 | `WORKSPACE_MODE` | `passthrough` (edits appear on the host instantly) or `ephemeral` (guest-side overlay: writes stay in the VM, `vm-work-diff` lists them, all is discarded at poweroff) — see [Ephemeral workspace](#ephemeral-workspace) | `passthrough` |
 | `NO_PAUSE` | Set to `1` to boot immediately instead of waiting for Enter on the session contract (the contract still prints). **The wait is the default since v0.16.0**: set this for any automation that runs the launcher on a terminal (tmux, `expect`, `script`, IDE tasks). Already skipped when stdin is not a terminal (pipes, cron); a one-shot `AGENTS_ARGS=-p …` run from a terminal still waits | (pause) |
 | `ENABLE_CRI` | Comma-separated list of container runtimes to activate: `containerd`, `crun`, `crio`, `docker`, `podman` | (disabled) |
