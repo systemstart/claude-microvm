@@ -347,8 +347,10 @@ in
 
     users.motd = "";
 
+    # Leaving the console's login shell ends the VM — the one that ran the
+    # agent (see interactiveShellInit), and no other login shell.
     programs.bash.logout = ''
-      sudo poweroff
+      if [ -n "''${_microvm_console:-}" ]; then sudo poweroff; fi
     '';
 
     security.sudo = {
@@ -489,32 +491,64 @@ SHAREEOF
           [ -f ~/.microvm-devshell.err ] && cat ~/.microvm-devshell.err
         fi
       fi
-      # An ephemeral session whose overlay did not mount would write straight
-      # through to the host while the user believes otherwise — the same
-      # silent-downgrade class as a failed egress seal, refused the same way.
-      if [ "''${WORKSPACE_MODE:-passthrough}" = "ephemeral" ] \
-         && ! grep -qE '^[^ ]+ /work overlay ' /proc/mounts \
-         && [ "''${EPHEMERAL_IGNORE:-0}" != "1" ]; then
-        echo "refusing to start ${cfg.name}: WORKSPACE_MODE=ephemeral, but /work is NOT an"
-        echo "overlay — writes would reach the host. See: systemctl status work-ephemeral"
-        echo "Launch with WORKSPACE_MODE=passthrough to share the workspace on purpose, or"
-        echo "EXTRA_ENV=EPHEMERAL_IGNORE=1 to override, and report this as a bug."
-        sudo poweroff
+      # The agent runs once per VM, from the console's login shell, and
+      # nothing else starts it: any interactive bash in the guest reads this
+      # file — one the agent opens itself, or `bash -l` typed at the console —
+      # and would otherwise start a second agent and power the VM off when it
+      # ended. MICROVM_AGENT, exported, marks every shell below the agent.
+      if [ "$(tty 2>/dev/null)" = /dev/hvc0 ] && shopt -q login_shell && [ -z "''${MICROVM_AGENT:-}" ]; then
+        export MICROVM_AGENT=${lib.escapeShellArg cfg.name}
+        _microvm_console=1
+        _microvm_refused=""
+        # An ephemeral session whose overlay did not mount would write straight
+        # through to the host while the user believes otherwise — the same
+        # silent-downgrade class as a failed egress seal, refused the same way.
+        if [ "''${WORKSPACE_MODE:-passthrough}" = "ephemeral" ] \
+           && ! grep -qE '^[^ ]+ /work overlay ' /proc/mounts \
+           && [ "''${EPHEMERAL_IGNORE:-0}" != "1" ]; then
+          echo "refusing to start ${cfg.name}: WORKSPACE_MODE=ephemeral, but /work is NOT an"
+          echo "overlay — writes would reach the host. See: systemctl status work-ephemeral"
+          echo "Launch with WORKSPACE_MODE=passthrough to share the workspace on purpose, or"
+          echo "EXTRA_ENV=EPHEMERAL_IGNORE=1 to override, and report this as a bug."
+          _microvm_refused=1
+        fi
+        # A sealed session whose seal did not hold must not quietly run open —
+        # that silent downgrade is exactly what the boot-time self-test exists
+        # to catch (modules/egress.nix). Refusing here keeps the message on the
+        # console instead of burying it in a failed boot.
+        if [ -f /run/egress-seal-failed ] && [ "''${EGRESS_SEAL_IGNORE:-0}" != "1" ]; then
+          cat /run/egress-seal-failed
+          echo "refusing to start ${cfg.name}. Launch with EGRESS_POLICY=open to run"
+          echo "unrestricted on purpose, or EXTRA_ENV=EGRESS_SEAL_IGNORE=1 to override,"
+          echo "and report this as a bug."
+          _microvm_refused=1
+        fi
+        if [ -n "$_microvm_refused" ]; then
+          sudo poweroff
+        else
+          # Started from the first prompt, not from here: bash does not come
+          # back from a job that stops while its startup files run, so ctrl+z
+          # (which the agents honour by stopping themselves) hung the console
+          # for good. From the prompt it is an ordinary job — ctrl+z leaves
+          # this shell, `fg` resumes the agent, and the VM powers off once no
+          # agent is left, run to its end or, stopped, abandoned with `exit`
+          # (programs.bash.logout).
+          _microvm_agent () {
+            if [ -z "''${_microvm_agent_ran:-}" ]; then
+              _microvm_agent_ran=1
+              echo "starting ${cfg.name} ..."
+              eval "${cfg.launchCommand} ''${AGENTS_ARGS:-}"
+            fi
+            if [ -n "$(jobs -p)" ]; then
+              echo "${cfg.name} is suspended — fg resumes it; exit (twice) powers the VM off"
+              return
+            fi
+            PROMPT_COMMAND=""
+            sudo poweroff
+          }
+          PROMPT_COMMAND=_microvm_agent
+        fi
       fi
-      # A sealed session whose seal did not hold must not quietly run open —
-      # that silent downgrade is exactly what the boot-time self-test exists
-      # to catch (modules/egress.nix). Refusing here keeps the message on the
-      # console instead of burying it in a failed boot.
-      if [ -f /run/egress-seal-failed ] && [ "''${EGRESS_SEAL_IGNORE:-0}" != "1" ]; then
-        cat /run/egress-seal-failed
-        echo "refusing to start ${cfg.name}. Launch with EGRESS_POLICY=open to run"
-        echo "unrestricted on purpose, or EXTRA_ENV=EGRESS_SEAL_IGNORE=1 to override,"
-        echo "and report this as a bug."
-        sudo poweroff
-      fi
-      echo "starting ${cfg.name} ..."
-      eval "${cfg.launchCommand} ''${AGENTS_ARGS:-}"
-      sudo poweroff
     '';
 
     systemd.tmpfiles.rules = [

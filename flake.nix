@@ -1921,6 +1921,10 @@ EOF
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
         };
+        agent-console = import ./tests/agent-console.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
         devshell-detection = import ./tests/devshell-detection.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;

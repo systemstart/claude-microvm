@@ -718,6 +718,12 @@ Three things worth knowing before pointing this at code you don't trust:
 
 Exiting the agent automatically powers off the VM.
 
+ctrl+z suspends the agent to a shell prompt on the VM's console: `fg` brings
+it back, and `exit` (twice — bash warns about the stopped job first) powers the
+VM off. Only the console's own login shell runs the agent; a `bash -i` or
+`bash -l` started inside the VM, by you or by the agent, is an ordinary shell
+that starts no second agent and powers nothing off when it ends.
+
 ### Nix dev shell support
 
 If your project has a `flake.nix` dev shell or uses [devenv](https://devenv.sh/), set `DIRENV_ALLOW=1` to make those tools available inside the VM:
