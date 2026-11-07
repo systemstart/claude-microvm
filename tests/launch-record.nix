@@ -108,8 +108,9 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
 
 
   # --- the API budget ---------------------------------------------------------------------
-  # The proxy is real; api.anthropic.com is out of the build's reach, so the
-  # first request is spent on a 502 and the second refused past the budget.
+  # The proxy is real; api.anthropic.com is out of the build's reach. A request
+  # that cannot reach it spends nothing (502); a batch, whose cost the proxy
+  # cannot read, is refused under API_BUDGET_TOKENS without going upstream.
   launch budget LAUNCH_RECORD=$R EGRESS_POLICY=enforce EGRESS_BUILTIN=0 API_BUDGET_REQUESTS=1 API_BUDGET_TOKENS=5000 HOLD=$TMPDIR/budget-release &
   for _ in $(seq 1 300); do [ -e $TMPDIR/budget/started ] && break; sleep 0.1; done
   B=$TMPDIR/budget-boot.json; cp $R $B
@@ -120,21 +121,22 @@ pkgs.runCommand "launch-record" { nativeBuildInputs = [ pkgs.socat pkgs.sqlite p
     && ok "the contract shows the budget" || bad "contract: $(grep -i budget $TMPDIR/budget/out)"
   port=$(cat "$(dirname "$(cat $TMPDIR/budget/exported)")/egress.port"); port=''${port##*:}
   codes=""
-  for _ in 1 2; do
-    codes="$codes $(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST --data '{}' http://127.0.0.1:$port/anthropic/v1/messages || true)"
+  for p in /v1/messages /v1/messages /v1/messages/batches; do
+    codes="$codes $(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST --data '{}' http://127.0.0.1:$port/anthropic$p || true)"
   done
-  [ "$codes" = " 502 403" ] && ok "past API_BUDGET_REQUESTS the proxy refuses (403)" || bad "budget statuses:$codes"
+  [ "$codes" = " 502 502 403" ] && ok "the budget reaches the proxy: an unreachable upstream spends nothing, a batch is refused (403)" \
+    || bad "budget statuses:$codes"
   touch $TMPDIR/budget-release; wait
   [ "$(cat $TMPDIR/budget/rc)" = 0 ] \
-    && [ "$(jq -c '.ended.apiUsage | map([.prefix, .requests, .refused, .exhausted, (.tokens | add), .budget])' $R)" = '[["/anthropic",1,1,true,0,{"maxRequests":1,"maxTokens":5000}]]' ] \
+    && [ "$(jq -c '.ended.apiUsage | map([.prefix, .requests, .refused, .exhausted, .unknownUsage, (.tokens | add), .budget])' $R)" = '[["/anthropic",0,1,false,0,0,{"maxRequests":1,"maxTokens":5000}]]' ] \
     && [ "$(jq -r .ended.egressDecisions.overBudget $R)" = 1 ] \
     && ok "at exit the record has what was spent, and the refusal counted" \
     || bad "budget at exit: rc $(cat $TMPDIR/budget/rc), $(jq -c '.ended | {apiUsage, egressDecisions}' $R)"
-  grep -q '^api /anthropic: 1 requests, 0 tokens, 1 refused — budget spent$' $TMPDIR/budget/out \
-    && grep -q 'the API budget ran out: 1 requests refused' $TMPDIR/budget/out \
-    && ok "the session end says what the API cost and that the budget ran out" || bad "summary: $(grep -i 'api\|budget' $TMPDIR/budget/out)"
+  grep -q '^api /anthropic: 0 requests, 0 tokens, 1 refused$' $TMPDIR/budget/out \
+    && grep -q '1 request(s) refused under the API budget' $TMPDIR/budget/out \
+    && ok "the session end says what the API cost and what the budget refused" || bad "summary: $(grep -i 'api\|budget' $TMPDIR/budget/out)"
   [ "$(jq -r .ended.egressVerdict.outcome $R)" = not-clean ] && jq -r '.ended.egressVerdict.details[]' $R | grep -q over_budget \
-    && ok "a run refused past its budget is judged not clean" || bad "budget verdict: $(jq -c .ended.egressVerdict $R)"
+    && ok "a run with a request refused under its budget is judged not clean" || bad "budget verdict: $(jq -c .ended.egressVerdict $R)"
 
   # --- cut short, and open ------------------------------------------------------------
   launch short LAUNCH_RECORD=$R VM_TIMEOUT=1 VM_TIMEOUT_GRACE=2 QMP=1 HOLD=$TMPDIR/never

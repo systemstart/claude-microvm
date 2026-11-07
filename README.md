@@ -542,7 +542,7 @@ It is written just before the VM boots and completed when the launch ends:
 | `shares`, `timeout`, `resources` | as in `instance.json`; memory and vCPUs as passed |
 | `egress` | `policy`, `builtinAllowlists`, `deny`; the session `allowlist` (`file`, `sha256`) and `auditLog` (null when `open`/`monitor` have none); the model `endpoints` the proxy serves, with their path grants and `usage` (the token parser, or null) (sealed modes); `usageFile`, and `apiBudget` (`maxRequests`, `maxTokens`; null without `API_BUDGET_*`) |
 | `env` | the names — never the values — of the API keys and `EXTRA_ENV` passed in, and `devShellFromHost` (`DIRENV_ALLOW=1`) |
-| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny`/`overBudget` counts from the audit log; null outside shadow/enforce), `apiUsage` (per model endpoint: `requests`, `refused`, `tokens` by kind, `budget`, `exhausted` — the proxy's usage file; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
+| `ended` | `null` until the launch ends; then `at`, `exitStatus` (124 if `VM_TIMEOUT` cut it short), `timedOut`, `egressDecisions` (`allow`/`deny`/`wouldDeny`/`overBudget` counts from the audit log; null outside shadow/enforce), `apiUsage` (per model endpoint: `requests`, `refused`, `tokens` by kind, `unknownUsage`, `budget`, `exhausted` — the proxy's usage file; null outside shadow/enforce), and `egressVerdict` (see below; null outside shadow/enforce) |
 
 A record whose `ended` is still `null` after the launcher has gone is one whose
 launcher was killed. A record already at the path is removed when the launcher
@@ -903,7 +903,13 @@ EGRESS_POLICY=enforce API_BUDGET_TOKENS=2000000 API_BUDGET_REQUESTS=300 make cla
   only; the request limit caps all three endpoints.
 - **The limit is checked before a request goes upstream.** A request already
   under way finishes, so a session can end a little over `API_BUDGET_TOKENS`
-  — by what its last concurrent requests returned.
+  — by what its last concurrent requests returned. A stream cut short is
+  charged what the API had reported by then. A request that never reached the
+  API spends nothing.
+- **Under `API_BUDGET_TOKENS` the meter fails closed.** A successful response
+  whose usage the proxy cannot read counts as `unknownUsage` in the usage
+  file and ends the token budget, since the spend is no longer known. A
+  message batch, whose cost only shows later, is refused outright.
 - **Without a budget the spend is still recorded.** Each launch writes
   `session-<…>.usage.json` (`latest.usage.json`) beside the audit log, kept
   current after every response, and the session summary at exit has a line

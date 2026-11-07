@@ -1726,10 +1726,11 @@ EOF
                 | "api \(.prefix): \(.requests) requests"
                   + (if .tokens then ", \(.tokens | add) tokens" else "" end)
                   + (if .refused > 0 then ", \(.refused) refused" else "" end)
+                  + (if (.unknownUsage // 0) > 0 then ", \(.unknownUsage) of unknown cost" else "" end)
                   + (if .exhausted then " — budget spent" else "" end)' "$EGRESS_USAGE" 2>/dev/null || true
             fi
             if [ "$_over" -gt 0 ]; then
-              echo "  the API budget ran out: $_over requests refused (API_BUDGET_REQUESTS / API_BUDGET_TOKENS)"
+              echo "  $_over request(s) refused under the API budget (API_BUDGET_REQUESTS / API_BUDGET_TOKENS): $EGRESS_USAGE"
             fi
             if [ "$_would" -gt 0 ]; then
               echo "  shadow found traffic enforce would block — the hosts are in the audit log:"
