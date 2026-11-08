@@ -4,7 +4,8 @@
 # the launcher holds it — until the VM is off, then the dir removed.
 #
 #   - finds a launch by ID, by instance dir, or as the only one running, and
-#     lists them rather than guess when there are several;
+#     lists them rather than guess when there are several — and with --list —
+#     with what tells them apart: start, flavor, terminal, project;
 #   - presses the power button (qmp_capabilities, then system_powerdown), or
 #     with --force sends quit, and waits until the launch has gone;
 #   - says so, without touching QMP, when a launch is no longer running;
@@ -16,7 +17,7 @@
 # tests/launch-scope.nix stops real launches with it, scoped and unscoped.
 { pkgs, lib, microvmStop }:
 
-pkgs.runCommand "microvm-stop" { nativeBuildInputs = with pkgs; [ jq socat util-linux ]; } ''
+pkgs.runCommand "microvm-stop" { nativeBuildInputs = with pkgs; [ jq procps socat util-linux ]; } ''
   fail=0
   ok ()  { echo "ok: $1"; }
   bad () { echo "FAIL: $1" >&2; fail=1; }
@@ -91,6 +92,36 @@ pkgs.runCommand "microvm-stop" { nativeBuildInputs = with pkgs; [ jq socat util-
      && grep -q /home/u/eeeeeeeeeeee <<< "$msg" && [ ! -e $TMPDIR/dddddddddddd.qmp ] && [ ! -e $TMPDIR/eeeeeeeeeeee.qmp ]; then
     ok "with no argument and two running, lists them (ID and project) and stops neither"
   else bad "two running: rc $rc: $msg"; fi
+
+  # What tells launches apart on one project: the start (local time), the
+  # flavor, and the terminal the launcher runs in — here a process on a pty.
+  script -qfc "echo \$\$ > $TMPDIR/term.pid; exec sleep 600" /dev/null >/dev/null 2>&1 &
+  pids+=($!)
+  for _ in $(seq 1 50); do [ -s $TMPDIR/term.pid ] && break; sleep 0.1; done
+  tpid=$(cat $TMPDIR/term.pid); tty=$(ps -o tty= -p $tpid | tr -d ' ')
+  jq --argjson pid $tpid '. + {pid: $pid, flavor: "gemini", started: "2026-11-07T17:02:03Z"}' \
+    $VMS/eeeeeeeeeeee/instance.json > $TMPDIR/j && mv $TMPDIR/j $VMS/eeeeeeeeeeee/instance.json
+  run --list
+  line=$(grep eeeeeeeeeeee <<< "$msg" || true)
+  if [ $rc = 0 ] && grep -q 'ID .*STARTED .*FLAVOR .*TERMINAL .*PROJECT' <<< "$msg" \
+     && [ "$(awk '{print $2, $3, $4, $5, $6}' <<< "$line")" = "$(date -d 2026-11-07T17:02:03Z '+%F %T') gemini $tty /home/u/eeeeeeeeeeee" ] \
+     && case $tty in pts/*) true ;; *) false ;; esac \
+     && grep -q 'dddddddddddd  -  ' <<< "$msg" && [ ! -e $TMPDIR/eeeeeeeeeeee.qmp ]; then
+    ok "--list lists the running launches with start, flavor, terminal and project, and stops none"
+  else bad "--list: rc $rc (tty $tty): $msg"; fi
+  run
+  grep -q "gemini  $tty" <<< "$msg" && ok "...as does the list printed when no launch is named" || bad "unnamed list: $msg"
+  run --list dddddddddddd
+  [ $rc = 2 ] && ok "--list with a launch named is a usage error" || bad "--list with an ID: rc $rc: $msg"
+  XDG_RUNTIME_DIR=$TMPDIR/none run --list
+  [ $rc = 0 ] && grep -q 'no running launches' <<< "$msg" && ok "--list with none running says so (exit 0)" || bad "--list, none: rc $rc: $msg"
+  # QEMU can hold the lock after its launcher has exited: that launch has no
+  # terminal, and the ones listed after it are still listed.
+  true & gone=$!; wait $gone
+  jq --argjson pid $gone '. + {pid: $pid}' $VMS/dddddddddddd/instance.json > $TMPDIR/j && mv $TMPDIR/j $VMS/dddddddddddd/instance.json
+  run --list
+  [ $rc = 0 ] && [ "$(awk '/dddddddddddd/ {print $4}' <<< "$msg")" = - ] && grep -q "gemini  $tty" <<< "$msg" \
+    && ok "--list goes on past a launch whose launcher has exited (terminal -)" || bad "--list, launcher gone: rc $rc: $msg"
 
   run --force dddddddddddd
   if [ $rc = 0 ] && grep -q 'dddddddddddd stopped' <<< "$msg" && grep -qx '{"execute":"quit"}' $TMPDIR/dddddddddddd.qmp \

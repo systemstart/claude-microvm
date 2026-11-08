@@ -486,15 +486,29 @@ The launcher refuses to start without a runtime dir (`XDG_RUNTIME_DIR`, or
 
 ### Stopping a VM from outside
 
-`microvm-stop` ships beside `microvm-run` (`./result/bin/microvm-stop` after
-`make`, or `nix run .#microvm-stop`), and the session contract names it with
-the launch's ID:
+`microvm-stop` ships beside `microvm-run`, in the same `bin/` — it is not put
+on your `PATH`. From the checkout, `make` runs it:
 
 ```sh
-microvm-stop <id>              # press the VM's power button and wait for it to go
-microvm-stop                   # the same, for the only running launch
-microvm-stop --force <id>      # stop QEMU at once, with no shutdown in the guest
+make vms                       # the running launches: ID, start, flavor, terminal, project
+make stop ID=<id>              # press the VM's power button and wait for it to go
+make stop                      # the same, for the only running launch
+make stop ID=<id> FORCE=1      # stop QEMU at once, with no shutdown in the guest
 ```
+
+or directly: `./result/bin/microvm-stop` after `make claude` (any flavor's
+build stops any flavor's launch), `nix run .#microvm-stop -- <id>`, or the full
+path the session contract prints on its `stop:` line, beside the launch's ID.
+
+```sh
+microvm-stop --list            # = make vms
+microvm-stop <id>              # = make stop ID=<id>
+microvm-stop --force <id>      # = make stop ID=<id> FORCE=1
+```
+
+With several launches on one project, the list tells them apart by start time
+and by the terminal each launcher runs in: `tty` in every terminal you can
+still type into names those, and a hung one is the terminal left over.
 
 It presses the power button over the launch's QMP socket, so the guest shuts
 down cleanly and the launcher then cleans up as after any VM exit. It waits
@@ -717,6 +731,12 @@ Three things worth knowing before pointing this at code you don't trust:
 ### Shutting down
 
 Exiting the agent automatically powers off the VM.
+
+ctrl+z suspends the agent to a shell prompt on the VM's console: `fg` brings
+it back, and `exit` (twice — bash warns about the stopped job first) powers the
+VM off. Only the console's own login shell runs the agent; a `bash -i` or
+`bash -l` started inside the VM, by you or by the agent, is an ordinary shell
+that starts no second agent and powers nothing off when it ends.
 
 ### Nix dev shell support
 
