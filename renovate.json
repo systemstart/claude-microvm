@@ -1,7 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "helpers:pinGitHubActionDigestsToSemver"
   ],
   "nix": {
     "enabled": true
@@ -11,6 +13,10 @@
     "schedule": ["before 7am on monday"]
   },
   "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "commitMessagePrefix": "ci(deps):"
+    },
     {
       "matchManagers": ["nix"],
       "matchPackageNames": ["nixpkgs"],
