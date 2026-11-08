@@ -16,16 +16,18 @@ jobs:
         with:
           determinate: false
           diagnostic-endpoint: ''
-      - name: Use systemstart Cachix cache
+      - name: Use the microvm-tools Cachix cache
         uses: cachix/cachix-action@v17
         with:
-          name: systemstart
+          name: microvm-tools
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           signingKey: ${{ secrets.CACHIX_SIGNING_KEY }}
           # Upstream microvm.nix CI publishes the QEMU variant our runner needs
           # (see README "Binary caches"); pulling it here avoids a ~20 min
           # source build after a flake.lock bump when the pins line up.
-          extraPullNames: microvm
+          # systemstart is this project's earlier cache, read until
+          # microvm-tools has caught up.
+          extraPullNames: microvm,systemstart
       - run: nix flake check --impure
       - run: nix build --impure .#claude
       - run: nix build --impure .#gemini
