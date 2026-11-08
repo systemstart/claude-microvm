@@ -101,21 +101,21 @@ WORK_DIR=/path/to/project nix run /path/to/this/repo#gemini
 WORK_DIR=/path/to/project nix run /path/to/this/repo#pi
 
 # Directly from git
-WORK_DIR=. nix run github:systemstart/claude-microvm
-WORK_DIR=. nix run github:systemstart/claude-microvm#gemini
-WORK_DIR=. nix run github:systemstart/claude-microvm#pi
+WORK_DIR=. nix run github:microvm-tools/agent-vm
+WORK_DIR=. nix run github:microvm-tools/agent-vm#gemini
+WORK_DIR=. nix run github:microvm-tools/agent-vm#pi
 ```
 
 ### Install to PATH
 
 ```sh
 # Claude Code (default)
-nix profile install github:systemstart/claude-microvm
+nix profile install github:microvm-tools/agent-vm
 
 # Other agents
-nix profile install github:systemstart/claude-microvm#gemini
-nix profile install github:systemstart/claude-microvm#codex
-nix profile install github:systemstart/claude-microvm#pi
+nix profile install github:microvm-tools/agent-vm#gemini
+nix profile install github:microvm-tools/agent-vm#codex
+nix profile install github:microvm-tools/agent-vm#pi
 
 # Now available everywhere
 WORK_DIR=/path/to/project microvm-run
@@ -127,7 +127,7 @@ Add as a dependency in another project's `flake.nix`:
 
 ```nix
 {
-  inputs.claude-vm.url = "github:systemstart/claude-microvm";
+  inputs.claude-vm.url = "github:microvm-tools/agent-vm";
 
   outputs = { nixpkgs, claude-vm, ... }:
     let system = "x86_64-linux"; in {
@@ -152,7 +152,7 @@ settings — builds it from a flavor rather than forking this repo:
 
 ```nix
 {
-  inputs.claude-vm.url = "github:systemstart/claude-microvm";
+  inputs.claude-vm.url = "github:microvm-tools/agent-vm";
 
   outputs = { claude-vm, ... }:
     let system = "x86_64-linux"; in {
@@ -243,12 +243,13 @@ in `cache.nixos.org`**. Building it from source takes roughly 20 minutes, and it
 recurs after every `flake.lock` bump that moves QEMU or its dependencies — not
 just on first use.
 
-Two caches serve the prebuilt QEMU (~35 MiB download), and `flake.nix` declares
-both in `nixConfig`:
+These caches serve the prebuilt QEMU (~35 MiB download), and `flake.nix` declares
+them in `nixConfig`:
 
 | Cache | Who signs it | Populated by |
 |-------|--------------|--------------|
-| `systemstart.cachix.org` | this project | every CI build of `.#claude`/`.#gemini`/`.#codex`/`.#pi` |
+| `microvm-tools.cachix.org` | this project | every CI build of `.#claude`/`.#gemini`/`.#codex`/`.#pi` |
+| `systemstart.cachix.org` | this project, before it moved to the microvm-tools organization | CI builds until that move; no longer pushed to |
 | `microvm.cachix.org` | upstream [microvm.nix](https://github.com/microvm-nix/microvm.nix) | upstream CI (hits only when its nixpkgs pin matches ours) |
 
 Substituters are a trust decision: a cache you enable can hand you any build
@@ -261,7 +262,7 @@ exact value, not per repo:
 
 ```
 do you want to allow configuration setting 'extra-substituters' to be set to
-'https://systemstart.cachix.org https://microvm.cachix.org' (y/N)?
+'https://microvm-tools.cachix.org https://systemstart.cachix.org https://microvm.cachix.org' (y/N)?
 ```
 
 **Answering the prompts is not enough on a multi-user install.** `substituters`
@@ -272,7 +273,7 @@ looks like this:
 
 ```
 do you want to permanently mark this value as trusted (y/N)? y
-warning: ignoring untrusted substituter 'https://systemstart.cachix.org', you are not a trusted user.
+warning: ignoring untrusted substituter 'https://microvm-tools.cachix.org', you are not a trusted user.
 warning: ignoring the client-specified setting 'trusted-public-keys', because it is a restricted setting and you are not a trusted user
 ```
 
@@ -282,8 +283,9 @@ and it works no matter who runs the build:
 ```nix
 # NixOS
 nix.settings = {
-  substituters = [ "https://systemstart.cachix.org" "https://microvm.cachix.org" ];
+  substituters = [ "https://microvm-tools.cachix.org" "https://systemstart.cachix.org" "https://microvm.cachix.org" ];
   trusted-public-keys = [
+    "microvm-tools.cachix.org-1:OmNkdhRACxrceImh52cuegLuzJCj5hZFwFA8scRBk7A="
     "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
     "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
   ];
@@ -292,8 +294,8 @@ nix.settings = {
 
 ```conf
 # non-NixOS: /etc/nix/nix.conf
-extra-substituters = https://systemstart.cachix.org https://microvm.cachix.org
-extra-trusted-public-keys = systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE= microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
+extra-substituters = https://microvm-tools.cachix.org https://systemstart.cachix.org https://microvm.cachix.org
+extra-trusted-public-keys = microvm-tools.cachix.org-1:OmNkdhRACxrceImh52cuegLuzJCj5hZFwFA8scRBk7A= systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE= microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys=
 ```
 
 Restart the daemon afterwards (`systemctl restart nix-daemon`, or
@@ -854,7 +856,7 @@ EGRESS_POLICY=enforce make claude.run   # sealed netdev; the allowlist is enforc
 
 Both seal the VM's network (`restrict=on`): every flow is refused except one
 hole that leads to a proxy on the host (`packages.egress-proxy` — Go stdlib
-only, from [microvm-policy](https://github.com/systemstart/microvm-policy)).
+only, from [microvm-policy](https://github.com/microvm-tools/microvm-policy)).
 The guest gets `HTTP(S)_PROXY` pointing at it, and:
 
 - **API keys never enter the guest.** The agent's `*_BASE_URL` points at the
