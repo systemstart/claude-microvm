@@ -54,7 +54,7 @@ pkgs.runCommand "agent-console" {
     local n=$1 console=$2; shift 2
     local h=$T/$n
     mkdir -p $h/home/.claude
-    echo '. '"$T"'/init.sh' > $h/home/.bash_profile
+    printf '. %s/init.sh && echo init-sourced\n' "$T" > $h/home/.bash_profile
     cp ${pkgs.writeText "logout" config.programs.bash.logout} $h/home/.bash_logout
     : > $h/events
     (
@@ -94,12 +94,16 @@ pkgs.runCommand "agent-console" {
     || { bad "plain: events '$(events plain)'"; tail -20 $T/plain/out.txt >&2; }
 
   # --- shells that are not the console's ------------------------------------------------------
-  run other no 'key exit\n' "wait out:logout"
-  [ "$(events other)" = "" ] && ok "a login shell on another terminal starts no agent and powers nothing off" \
-    || bad "another terminal: events '$(events other)'"
-  EXTRA=MICROVM_AGENT=claude run nested yes 'key exit\n' "wait out:logout"
-  [ "$(events nested)" = "" ] && ok "nor does one on the console below the agent (MICROVM_AGENT set)" \
-    || bad "nested: events '$(events nested)'"
+  # No events is only worth something from a shell that ran the init and got
+  # to a prompt: the profile says it sourced the init, and a command typed at
+  # the prompt answers (up-42, which the echo of the typed line cannot show).
+  ready () { grep -q '^init-sourced$' $T/$1/out.txt && grep -q '^up-42$' $T/$1/out.txt; }
+  run other no 'key echo up-$((6*7))\n' "wait out:^up-42" 'key exit\n' "wait out:logout"
+  ready other && [ "$(events other)" = "" ] && ok "a login shell on another terminal starts no agent and powers nothing off" \
+    || { bad "another terminal: events '$(events other)'"; tail -20 $T/other/out.txt >&2; }
+  EXTRA=MICROVM_AGENT=claude run nested yes 'key echo up-$((6*7))\n' "wait out:^up-42" 'key exit\n' "wait out:logout"
+  ready nested && [ "$(events nested)" = "" ] && ok "nor does one on the console below the agent (MICROVM_AGENT set)" \
+    || { bad "nested: events '$(events nested)'"; tail -20 $T/nested/out.txt >&2; }
 
   [ "$fail" -eq 0 ] || exit 1
   touch $out
