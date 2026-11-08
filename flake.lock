@@ -111,13 +111,13 @@
       "locked": {
         "lastModified": 1794077747,
         "narHash": "sha256-mC2ZrZSmGXgFZtqt8YcxhKMHKN6DgzTRgykEHePcYgg=",
-        "owner": "microvm-tools",
+        "owner": "nix-gizmos",
         "repo": "microvm-policy",
         "rev": "9c49a0ccee1102c9e07e6fb90daff4b654726125",
         "type": "github"
       },
       "original": {
-        "owner": "microvm-tools",
+        "owner": "nix-gizmos",
         "ref": "v0.6.1",
         "repo": "microvm-policy",
         "type": "github"
