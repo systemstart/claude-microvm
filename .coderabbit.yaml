@@ -3,15 +3,12 @@
 # CodeRabbit for this repository (schema: the URL above). The organization
 # is on the Essentials plan: 5 PR reviews per hour per developer, with
 # usage-based reviews off, so a review over that limit waits rather than
-# costs extra. These settings spend reviews where they help.
+# costs extra.
+#
+# Reviews run only when asked for: comment `@coderabbitai review` on a PR
+# (`@coderabbitai full review` reviews every file again). A change that
+# spans several repositories is then reviewed where it helps, not in each.
 reviews:
   profile: chill
   auto_review:
-    enabled: true
-    # One review when the PR is opened. After further pushes, ask for
-    # another with a PR comment: @coderabbitai review
-    auto_incremental_review: false
-    # Renovate's dependency updates are covered by CI and read by a person
-    # before merging; they don't spend reviews.
-    ignore_usernames:
-      - renovate[bot]
+    enabled: false
