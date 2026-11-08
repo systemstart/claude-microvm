@@ -34,7 +34,13 @@ jobs:
             else echo "::error::$1 is not a Conventional Commit (type(scope): description): $2"; fail=1; fi
           }
           check "PR title" "$TITLE"
+          # git log runs first, on its own: in a process substitution its
+          # failure would be lost, and a good title alone would pass.
+          if ! subjects=$(git log --no-merges --format='%h %s' "$BASE..$HEAD"); then
+            echo "::error::git log $BASE..$HEAD failed: the commits were not checked"; exit 1
+          fi
+          [ -n "$subjects" ] || { echo "::error::no commits in $BASE..$HEAD to check"; exit 1; }
           while IFS= read -r line; do
             check "commit ${line%% *}" "${line#* }"
-          done < <(git log --no-merges --format='%h %s' "$BASE..$HEAD")
+          done <<< "$subjects"
           exit "$fail"
