@@ -1,0 +1,46 @@
+# conventional.yml — the PR title and every commit subject in the PR follow
+# Conventional Commits. The commit subjects become the release notes; the
+# title becomes the merge commit's message. Runs again when the title is
+# edited, so fixing it clears the check.
+name: Conventional Commits
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: PR title and commit subjects
+        env:
+          # Through the environment, never interpolated into the script: a
+          # title is free text.
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          re='^(feat|fix|docs|chore|ci|build|test|refactor|perf|style|revert|harden|sec|security)(\([^()]+\))?!?: [^ ]'
+          fail=0
+          check() {
+            if [[ "$2" =~ $re ]]; then echo "ok    $1: $2"
+            else echo "::error::$1 is not a Conventional Commit (type(scope): description): $2"; fail=1; fi
+          }
+          check "PR title" "$TITLE"
+          # git log runs first, on its own: in a process substitution its
+          # failure would be lost, and a good title alone would pass.
+          if ! subjects=$(git log --no-merges --format='%h %s' "$BASE..$HEAD"); then
+            echo "::error::git log $BASE..$HEAD failed: the commits were not checked"; exit 1
+          fi
+          [ -n "$subjects" ] || { echo "::error::no commits in $BASE..$HEAD to check"; exit 1; }
+          while IFS= read -r line; do
+            check "commit ${line%% *}" "${line#* }"
+          done <<< "$subjects"
+          exit "$fail"
