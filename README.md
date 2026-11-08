@@ -101,21 +101,21 @@ WORK_DIR=/path/to/project nix run /path/to/this/repo#gemini
 WORK_DIR=/path/to/project nix run /path/to/this/repo#pi
 
 # Directly from git
-WORK_DIR=. nix run github:systemstart/claude-microvm
-WORK_DIR=. nix run github:systemstart/claude-microvm#gemini
-WORK_DIR=. nix run github:systemstart/claude-microvm#pi
+WORK_DIR=. nix run github:microvm-tools/agent-vm
+WORK_DIR=. nix run github:microvm-tools/agent-vm#gemini
+WORK_DIR=. nix run github:microvm-tools/agent-vm#pi
 ```
 
 ### Install to PATH
 
 ```sh
 # Claude Code (default)
-nix profile install github:systemstart/claude-microvm
+nix profile install github:microvm-tools/agent-vm
 
 # Other agents
-nix profile install github:systemstart/claude-microvm#gemini
-nix profile install github:systemstart/claude-microvm#codex
-nix profile install github:systemstart/claude-microvm#pi
+nix profile install github:microvm-tools/agent-vm#gemini
+nix profile install github:microvm-tools/agent-vm#codex
+nix profile install github:microvm-tools/agent-vm#pi
 
 # Now available everywhere
 WORK_DIR=/path/to/project microvm-run
@@ -127,7 +127,7 @@ Add as a dependency in another project's `flake.nix`:
 
 ```nix
 {
-  inputs.claude-vm.url = "github:systemstart/claude-microvm";
+  inputs.claude-vm.url = "github:microvm-tools/agent-vm";
 
   outputs = { nixpkgs, claude-vm, ... }:
     let system = "x86_64-linux"; in {
@@ -152,7 +152,7 @@ settings — builds it from a flavor rather than forking this repo:
 
 ```nix
 {
-  inputs.claude-vm.url = "github:systemstart/claude-microvm";
+  inputs.claude-vm.url = "github:microvm-tools/agent-vm";
 
   outputs = { claude-vm, ... }:
     let system = "x86_64-linux"; in {
@@ -856,7 +856,7 @@ EGRESS_POLICY=enforce make claude.run   # sealed netdev; the allowlist is enforc
 
 Both seal the VM's network (`restrict=on`): every flow is refused except one
 hole that leads to a proxy on the host (`packages.egress-proxy` — Go stdlib
-only, from [microvm-policy](https://github.com/systemstart/microvm-policy)).
+only, from [microvm-policy](https://github.com/microvm-tools/microvm-policy)).
 The guest gets `HTTP(S)_PROXY` pointing at it, and:
 
 - **API keys never enter the guest.** The agent's `*_BASE_URL` points at the

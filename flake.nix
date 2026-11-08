@@ -33,7 +33,7 @@
     # egress-report, and the generic allowlist. This flake keeps only the
     # consumer glue — the launcher and the agent-specific allowlists.
     microvm-policy = {
-      url = "github:systemstart/microvm-policy/v0.6.1";
+      url = "github:microvm-tools/microvm-policy/v0.6.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
