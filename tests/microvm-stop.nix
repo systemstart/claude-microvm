@@ -115,6 +115,13 @@ pkgs.runCommand "microvm-stop" { nativeBuildInputs = with pkgs; [ jq procps soca
   [ $rc = 2 ] && ok "--list with a launch named is a usage error" || bad "--list with an ID: rc $rc: $msg"
   XDG_RUNTIME_DIR=$TMPDIR/none run --list
   [ $rc = 0 ] && grep -q 'no running launches' <<< "$msg" && ok "--list with none running says so (exit 0)" || bad "--list, none: rc $rc: $msg"
+  # QEMU can hold the lock after its launcher has exited: that launch has no
+  # terminal, and the ones listed after it are still listed.
+  true & gone=$!; wait $gone
+  jq --argjson pid $gone '. + {pid: $pid}' $VMS/dddddddddddd/instance.json > $TMPDIR/j && mv $TMPDIR/j $VMS/dddddddddddd/instance.json
+  run --list
+  [ $rc = 0 ] && [ "$(awk '/dddddddddddd/ {print $4}' <<< "$msg")" = - ] && grep -q "gemini  $tty" <<< "$msg" \
+    && ok "--list goes on past a launch whose launcher has exited (terminal -)" || bad "--list, launcher gone: rc $rc: $msg"
 
   run --force dddddddddddd
   if [ $rc = 0 ] && grep -q 'dddddddddddd stopped' <<< "$msg" && grep -qx '{"execute":"quit"}' $TMPDIR/dddddddddddd.qmp \

@@ -40,7 +40,7 @@ vms:
 	@nix run $(NIX_FLAGS) .#microvm-stop -- --list
 
 stop:
-	@nix run $(NIX_FLAGS) .#microvm-stop -- $(if $(FORCE),--force) $(ID)
+	@nix run $(NIX_FLAGS) .#microvm-stop -- $(if $(filter 1,$(FORCE)),--force) $(ID)
 
 # The annotated tag's body becomes the release notes (see .github/workflows/release.yml),
 # so it is written here, before the tag is pushed — not patched into the release after.

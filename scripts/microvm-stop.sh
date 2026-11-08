@@ -79,7 +79,11 @@ list() {
     j="$d/instance.json"
     pid="$(jq -r '.pid // empty' "$j" 2>/dev/null)"
     tty=""
-    [[ "$pid" =~ ^[0-9]+$ ]] && tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')"
+    # QEMU can hold the lock after its launcher has gone: no terminal then,
+    # and ps failing must not end the list (set -e).
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+      tty="$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')" || tty=""
+    fi
     started="$(jq -r '.started // empty' "$j" 2>/dev/null)"
     [ -n "$started" ] && started="$(date -d "$started" '+%F %T' 2>/dev/null || echo "$started")"
     printf '  %-12s  %-19s  %-6s  %-8s  %s\n' "$(basename "$d")" "${started:--}" \
