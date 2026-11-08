@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit for this repository (schema: the URL above). The organization
+# is on the Essentials plan: 5 PR reviews per hour per developer, with
+# usage-based reviews off, so a review over that limit costs nothing extra
+# but does not run either. CodeRabbit then comments on the PR and reports a
+# PASSING "Review rate limited" check: that comment is the only sign that
+# no review happened. `@coderabbitai rate limit` says when capacity is
+# back; ask again with `@coderabbitai review` then.
+#
+# Reviews run only when asked for: comment `@coderabbitai review` on a PR
+# (`@coderabbitai full review` reviews every file again). A change that
+# spans several repositories is then reviewed where it helps, not in each.
+reviews:
+  profile: chill
+  auto_review:
+    enabled: false
