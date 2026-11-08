@@ -11,11 +11,13 @@
   # prompts) unless you are a trusted user.
   nixConfig = {
     extra-substituters = [
+      "https://nix-gizmos.cachix.org"
       "https://microvm-tools.cachix.org"
       "https://systemstart.cachix.org"
       "https://microvm.cachix.org"
     ];
     extra-trusted-public-keys = [
+      "nix-gizmos.cachix.org-1:a8qWp7lYufNBEKQEpJf54r0WVE0ksypqnFxOyemSlX4="
       "microvm-tools.cachix.org-1:OmNkdhRACxrceImh52cuegLuzJCj5hZFwFA8scRBk7A="
       "systemstart.cachix.org-1:hSTfDlXstyuVVukogR0sEmt8wJsaplp7NvisgUugNpE="
       "microvm.cachix.org-1:oXnBc6hRE3eX5rSYdRyMYXnfzcCxC7yKPTbZXALsqys="
@@ -33,7 +35,7 @@
     # egress-report, and the generic allowlist. This flake keeps only the
     # consumer glue — the launcher and the agent-specific allowlists.
     microvm-policy = {
-      url = "github:microvm-tools/microvm-policy/v0.6.1";
+      url = "github:nix-gizmos/microvm-policy/v0.6.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
