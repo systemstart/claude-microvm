@@ -25,6 +25,12 @@
     {
       "matchManagers": ["nix"],
       "matchPackageNames": ["microvm", "microvm-policy"]
+    },
+    {
+      "description": "cachix-action and nix-installer-action tag their releases vN only, with no vN.N.N. helpers:pinGitHubActionDigestsToSemver extracts vN.N.N tags only, so it would find no versions for them; take vN here.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["cachix/cachix-action", "DeterminateSystems/nix-installer-action"],
+      "extractVersion": "^(?<version>v\\d+)$"
     }
   ]
 }
