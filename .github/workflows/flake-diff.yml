@@ -21,6 +21,11 @@ jobs:
       NIXPKGS_ALLOW_UNFREE: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The job evaluates the PR's flake, so PR code runs here; it never
+          # pushes, and needs no token left in the git config. (flake-diff
+          # fetches the base commit anonymously: fine while this repo is public.)
+          persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
         with:
           determinate: false

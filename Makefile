@@ -85,4 +85,4 @@ release-tag:
 FLAKE_DIFF ?= github:nix-gizmos/flake-diff-action/v0.1.0
 flake-diff:
 	nix run $(FLAKE_DIFF) -- --impure \
-	  $(if $(BASE),--base $(BASE)) $(if $(BUILD),--build) claude gemini codex pi
+	  $(if $(BASE),--base $(BASE)) $(if $(filter 1,$(BUILD)),--build) claude gemini codex pi
