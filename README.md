@@ -869,11 +869,17 @@ The guest gets `HTTP(S)_PROXY` pointing at it, and:
   mints its own token, which the proxy passes through — that mode keeps a
   token in the guest, and the full credential guarantee applies to API-key
   mode only.
-- **The API path allowlist is a capability grant**: only the inference
-  endpoints are reachable by default (even with a valid key,
-  `api.anthropic.com` is an exfiltration channel via its upload endpoints).
-  Claude gets exactly `/v1/messages` and `/v1/messages/count_tokens`, not
-  the batches API below them, which stores results for later retrieval.
+- **The API path allowlist is a capability grant** on the proxy endpoint,
+  where the host's key is injected: only the inference endpoints are
+  reachable through it (even with a valid key, `api.anthropic.com` is an
+  exfiltration channel via its upload endpoints). Claude gets exactly
+  `/v1/messages` and `/v1/messages/count_tokens`, not the batches API below
+  them, which stores results for later retrieval. `enforce` refuses other
+  paths; `shadow` forwards them and records `would_deny`. The grant binds
+  the host's key, not every token: Claude's allowlist has `anthropic.com`
+  for its other calls (feature flags, telemetry, mcp-proxy), so a client
+  holding its own token, as under OAuth login, can still reach any API path
+  through a `CONNECT` tunnel.
 - **Everything else is an opaque `CONNECT` tunnel**, never decrypted,
   checked against the same tiered allowlist as `alert` — with one addition:
   an entry may grant a port, e.g. `github.com:22` for git over SSH (ssh is
