@@ -682,7 +682,7 @@ marked `⚠`.
 
 #### Hardening notes
 
-Three things worth knowing before pointing this at code you don't trust:
+A few things worth knowing before pointing this at code you don't trust:
 
 - **`DIRENV_ALLOW=1` evaluates the work directory's Nix code on the host.** The dev
   shell cache runs `nix print-dev-env` (or `devenv print-dev-env`) against
@@ -705,10 +705,24 @@ Three things worth knowing before pointing this at code you don't trust:
   host-side `git` commit or push, editor task, or unsandboxed agent session.
   `WORKSPACE_GUARD=1` makes the ones that exist at
   boot read-only inside the guest (kernel-enforced bind mounts the agent user
-  cannot undo). Opt-in for now because denial breaks a workflow this project
+  cannot undo), at the workspace root and in every git repository up to two
+  directories below it, since a `WORK_DIR` is often a directory of checkouts
+  (`microvmPolicy.workspaceGuard.repoDepth`, overridable through
+  `lib.mkNixosConfig`). Opt-in for now because denial breaks a workflow this project
   itself uses — asking the agent to write a project skill or register an MCP
   server. It cannot protect a file that does not exist yet; the session
   contract states the guard's state either way.
+- **The guest reaches the host kernel through as little as possible.**
+  Networking is user-mode (slirp, inside the QEMU process): no tap, bridge,
+  vhost-net or vhost-vsock, so guest-built packets and their offload metadata
+  never enter the host's network stack, where guest-to-host bugs of that
+  class live. The price is that slirp, the virtio device models and the
+  9p store share run inside QEMU, as your user: QEMU runs under a seccomp filter
+  (`-sandbox` with obsolete syscalls, privilege changes and scheduler control
+  denied) and its QMP socket sits in the launch's own instance directory,
+  but it is not confined on the filesystem. The `host-surface` check fails CI
+  if a microvm.nix update ever adds such a device, a second QMP socket or
+  drops the seccomp anchor. Keep the host kernel patched regardless.
 - **Unprivileged user namespaces are enabled in the guest** (the NixOS default).
   That gives an unprivileged guest user namespaced `CAP_NET_ADMIN` and reach into
   subsystems such as `net/sched`, the entry point for a recurring class of local

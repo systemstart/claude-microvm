@@ -1343,6 +1343,11 @@ EOF
           # which would land in whatever directory the launcher runs from, and
           # two launches from one directory would take it from each other.
           -e "s|-qmp unix:${hostname}.sock,|-qmp unix:$QMP_SOCK,|g"
+          # Tighter seccomp than microvm.nix's plain `-sandbox on`: no obsolete
+          # syscalls, no setuid/capability changes, no affinity or scheduler
+          # changes. spawn stays allowed: the sealed netdev's guestfwd forks
+          # socat per guest connection. tests/host-surface.nix pins the anchor.
+          -e "s|-sandbox on |-sandbox on,obsolete=deny,elevateprivileges=deny,resourcecontrol=deny |"
           # CRI storage volume image: microvm.nix emits the relative path
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.
@@ -1485,7 +1490,7 @@ EOF
         fi
         if [ "''${WORKSPACE_GUARD:-}" = "1" ]; then
           _row workspace ok "guard on — host-executed config is read-only in the guest"
-          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc"
+          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc — in repos up to 2 levels down too"
         else
           _row workspace warn "guard off — the guest may write host-executed config"
           _hint "WORKSPACE_GUARD=1 makes .git/hooks, .mcp.json, .envrc, … read-only"
@@ -1821,6 +1826,10 @@ EOF
           microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
         })
         { claude-vm.cri.enable = true; }
+        # A WORK_DIR is often a directory of checkouts, not one repo, and every
+        # one of them has a .git/config the host runs git against: with
+        # WORKSPACE_GUARD=1 the binds cover repositories two levels down too.
+        { microvmPolicy.workspaceGuard.repoDepth = lib.mkDefault 2; }
       ];
 
       flavorOf = flavor:
@@ -2016,6 +2025,12 @@ EOF
         settings-seed = import ./tests/settings-seed.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
+        };
+        host-surface = import ./tests/host-surface.nix {
+          inherit pkgs lib;
+          runners = builtins.mapAttrs (name: flavor:
+            self.nixosConfigurations."${name}${flavor.suffix}-${system}".config.microvm.runner.qemu) vmFlavors;
+          launcher = self.packages.${system}.claude;
         };
         work-cache = import ./tests/work-cache.nix {
           inherit pkgs lib;
