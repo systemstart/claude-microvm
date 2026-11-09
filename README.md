@@ -30,7 +30,9 @@ Each flavor packages a different AI coding agent. The VM is built as composable 
 
 All flavors include container runtime support (Docker, containerd, CRI-O, Podman) — activated at runtime via `ENABLE_CRI`.
 
-> **Gemini CLI first login:** Choosing "Login with Google" restarts the CLI process, which causes the VM to shut down (the VM powers off when the agent exits). On the next launch the CLI prompts for a token with a login URL directly and works normally. This is a first-start-only issue.
+> **Gemini CLI first login:** Choosing "Login with Google" restarts the CLI process, which causes the VM to shut down (the VM powers off when the agent exits). On the next launch the CLI prompts for a token with a login URL directly. This is a first-start-only issue. Google login only serves accounts Google still supports Gemini CLI for (next note).
+
+> **Who can still use Gemini CLI, and the nixpkgs removal.** These are two separate changes. Since 2026-06-18 Google no longer serves Gemini CLI to its free tier (Code Assist for individuals) or to Google AI Pro/Ultra subscribers; those moved to Antigravity CLI. Code Assist Standard and Enterprise licenses, and paid Gemini API keys (`GEMINI_API_KEY`), keep working ([Google's announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)). Separately, nixpkgs marks `gemini-cli` for removal; the flavor works until nixpkgs drops the package. The removal notice is silenced in `modules/agents/gemini.nix`, where the plan for that day is noted.
 
 ## Prerequisites
 

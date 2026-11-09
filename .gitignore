@@ -5,3 +5,8 @@ result
 # QEMU control socket: microvm.socket defaults to a relative "<hostname>.sock",
 # so it is created in the directory you launch the VM from.
 *-vm.sock
+
+# Local agent and IDE state: never committed (a VM session writes credentials
+# and transcripts under .claude/).
+/.claude/
+/.idea/
