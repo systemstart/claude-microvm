@@ -32,6 +32,8 @@ All flavors include container runtime support (Docker, containerd, CRI-O, Podman
 
 > **Gemini CLI first login:** Choosing "Login with Google" restarts the CLI process, which causes the VM to shut down (the VM powers off when the agent exits). On the next launch the CLI prompts for a token with a login URL directly and works normally. This is a first-start-only issue.
 
+> **Gemini CLI is deprecated upstream.** Google replaced it with Antigravity CLI for the free tier and Google AI Pro/Ultra subscribers, and nixpkgs marks `gemini-cli` for removal. Google-account logins on those plans are what moved; with an API key (`GEMINI_API_KEY`) the flavor keeps working until nixpkgs drops the package. The removal notice is silenced in `modules/agents/gemini.nix`, where the plan for that day is noted.
+
 ## Prerequisites
 
 - [Nix](https://nixos.org/) with flakes enabled
