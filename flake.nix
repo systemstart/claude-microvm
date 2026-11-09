@@ -1686,6 +1686,16 @@ EOF
         # Run QEMU with corrected paths
         _VM_RC=0
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run) || _VM_RC=$?
+        # A VM stopped from outside (microvm-stop, make stop, VM_TIMEOUT) ends
+        # without the agent's TUI switching off what it switched on: mouse
+        # tracking, focus events, bracketed paste, the kitty keyboard
+        # protocol, a hidden cursor. The host terminal then types mouse
+        # reports into the shell ("35;63;49M": command not found) until
+        # `reset`. Switch them off on the way out; after a normal exit they
+        # are off already and this changes nothing.
+        if [ -t 1 ]; then
+          printf '\e[?1000l\e[?1002l\e[?1003l\e[?1005l\e[?1006l\e[?1015l\e[?1004l\e[?2004l\e[=0;1u\e[?25h\e[0m'
+        fi
         if [ -n "$_TIMEOUT_PID" ]; then
           kill "$_TIMEOUT_PID" 2>/dev/null || true
           # 124, as timeout(1) exits, so a caller can tell a run cut short
