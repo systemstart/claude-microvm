@@ -87,7 +87,7 @@
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { }, guardRepoDepth ? 0 }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { }, guardRepoDepth }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
