@@ -871,9 +871,20 @@ The guest gets `HTTP(S)_PROXY` pointing at it, and:
   mints its own token, which the proxy passes through — that mode keeps a
   token in the guest, and the full credential guarantee applies to API-key
   mode only.
-- **The API path allowlist is a capability grant**: only the inference
-  endpoints are reachable by default (even with a valid key,
-  `api.anthropic.com` is an exfiltration channel via its upload endpoints).
+- **The API path allowlist is a capability grant** on the proxy endpoint,
+  where the host's key is injected: only the inference endpoints are
+  reachable through it (even with a valid key, `api.anthropic.com` is an
+  exfiltration channel via its upload endpoints). Claude gets exactly
+  `/v1/messages` and `/v1/messages/count_tokens`, not the batches API below
+  them, which stores results for later retrieval. `enforce` refuses other
+  paths; `shadow` forwards them and records `would_deny` — except that with
+  `API_BUDGET_TOKENS` set, a path whose spend the proxy cannot read (a
+  batch) is refused `over_budget` in both modes (see
+  [API budget](#api-budget)). The grant binds the host's key, not every
+  token: Claude's allowlist has `anthropic.com` for its other calls (feature
+  flags, telemetry, mcp-proxy), so a client holding its own token, as under
+  OAuth login, can still reach any API path through a `CONNECT` tunnel —
+  outside the grant and outside the budget.
 - **Everything else is an opaque `CONNECT` tunnel**, never decrypted,
   checked against the same tiered allowlist as `alert` — with one addition:
   an entry may grant a port, e.g. `github.com:22` for git over SSH (ssh is
@@ -934,8 +945,15 @@ EGRESS_POLICY=enforce API_BUDGET_TOKENS=2000000 API_BUDGET_REQUESTS=300 make cla
   API spends nothing.
 - **Under `API_BUDGET_TOKENS` the meter fails closed.** A successful response
   whose usage the proxy cannot read counts as `unknownUsage` in the usage
-  file and ends the token budget, since the spend is no longer known. A
-  message batch, whose cost only shows later, is refused outright.
+  file and ends the token budget, since the spend is no longer known. A path
+  whose cost only shows later (message batches) is refused `over_budget`
+  before it goes upstream, in `shadow` too; for Claude it is outside the
+  path grant anyway.
+- **The budget meters the proxy endpoint, not every token.** A client that
+  holds its own token, as under OAuth login, can reach `api.anthropic.com`
+  through a `CONNECT` tunnel (`anthropic.com` is on Claude's allowlist for
+  its other calls). That traffic is neither counted nor refused, and is
+  missing from the usage file: the budget caps the host's key.
 - **Without a budget the spend is still recorded.** Each launch writes
   `session-<…>.usage.json` (`latest.usage.json`) beside the audit log, kept
   current after every response, and the session summary at exit has a line

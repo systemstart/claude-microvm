@@ -61,7 +61,7 @@ pkgs.runCommand "egress-builtin" { nativeBuildInputs = [ pkgs.curl pkgs.jq ]; } 
   # serves it under its path grant, and the contract must not suggest otherwise.
   for b in 0 1; do
     DENY=anthropic.com assemble $b "" 2>deny.err
-    if grep -q "api.anthropic.com is NOT blocked — the agent's model endpoint (/v1/messages)" rules.txt && grep -q "covers the model endpoint api.anthropic.com" deny.err; then
+    if grep -qF "api.anthropic.com is NOT blocked — the agent's model endpoint (/v1/messages$, /v1/messages/count_tokens$)" rules.txt && grep -q "covers the model endpoint api.anthropic.com" deny.err; then
       ok "EGRESS_BUILTIN=$b, EGRESS_DENY=anthropic.com: contract and warning say the model endpoint stays reachable"
     else bad "EGRESS_BUILTIN=$b: a deny covering the model endpoint is not called out:"; cat rules.txt deny.err >&2; fi
   done
