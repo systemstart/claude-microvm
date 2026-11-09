@@ -1,0 +1,32 @@
+name: Flake diff
+
+# Renovate's lock-file maintenance and nixpkgs bumps only touch flake.lock.
+# This comments on those PRs with what actually moves in the four runners,
+# every package included, from evaluation alone; a long report is split
+# over several comments. Never pull_request_target: evaluating the flake
+# runs the PR's code.
+on:
+  pull_request:
+    branches: [main]
+    paths: [flake.lock]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  flake-diff:
+    runs-on: ubuntu-26.04
+    env:
+      NIXPKGS_ALLOW_UNFREE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          determinate: false
+          diagnostic-endpoint: ''
+      # Keep the version in step with FLAKE_DIFF in the Makefile.
+      - uses: nix-gizmos/flake-diff-action@36853ebc13a37e90691210d5f5cae67df5fda987 # v0.1.0
+        with:
+          attributes: claude gemini codex pi
+          impure: true
