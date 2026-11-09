@@ -719,8 +719,9 @@ A few things worth knowing before pointing this at code you don't trust:
   never enter the host's network stack, where guest-to-host bugs of that
   class live. The price is that slirp, the virtio device models and the
   9p store share run inside QEMU, as your user: QEMU runs under a seccomp filter
-  (`-sandbox` with obsolete syscalls, privilege changes and scheduler control
-  denied) and its QMP socket sits in the launch's own instance directory,
+  (`-sandbox` with obsolete syscalls and scheduler control denied; not
+  privilege changes, whose set includes the `setsid` the sealed netdev's
+  per-connection socat needs) and its QMP socket sits in the launch's own instance directory,
   but it is not confined on the filesystem. The `host-surface` check fails CI
   if a microvm.nix update ever adds such a device, a second QMP socket or
   drops the seccomp anchor. Keep the host kernel patched regardless.

@@ -1344,10 +1344,13 @@ EOF
           # two launches from one directory would take it from each other.
           -e "s|-qmp unix:${hostname}.sock,|-qmp unix:$QMP_SOCK,|g"
           # Tighter seccomp than microvm.nix's plain `-sandbox on`: no obsolete
-          # syscalls, no setuid/capability changes, no affinity or scheduler
-          # changes. spawn stays allowed: the sealed netdev's guestfwd forks
-          # socat per guest connection. tests/host-surface.nix pins the anchor.
-          -e "s|-sandbox on |-sandbox on,obsolete=deny,elevateprivileges=deny,resourcecontrol=deny |"
+          # syscalls, no affinity or scheduler changes. spawn stays allowed:
+          # the sealed netdev's guestfwd forks socat per guest connection.
+          # elevateprivileges stays allowed too: its set covers setsid, which
+          # libslirp's child calls before exec, and the filter is inherited —
+          # socat would be killed and every proxied connection reset (=deny
+          # and =children alike). tests/host-surface.nix pins both.
+          -e "s|-sandbox on |-sandbox on,obsolete=deny,resourcecontrol=deny |"
           # CRI storage volume image: microvm.nix emits the relative path
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.

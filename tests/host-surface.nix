@@ -47,10 +47,19 @@ pkgs.runCommand "host-surface" { } ''
     fi
   '') runners)}
 
-  if grep -qF -- 's|-sandbox on |-sandbox on,obsolete=deny,elevateprivileges=deny,resourcecontrol=deny |' ${launcher}/bin/microvm-run; then
+  if grep -qF -- 's|-sandbox on |-sandbox on,obsolete=deny,resourcecontrol=deny |' ${launcher}/bin/microvm-run; then
     ok "launcher tightens -sandbox"
   else
     bad "launcher no longer tightens -sandbox"
+  fi
+  # elevateprivileges (=deny or =children) blocks setsid, which libslirp's
+  # guestfwd child calls before exec: the inherited filter kills socat and
+  # every connection through the sealed netdev is reset. Found on a real
+  # launch; nothing else in CI exercises guestfwd.
+  if grep -qE -- '-sandbox on[^ |]*elevateprivileges' ${launcher}/bin/microvm-run; then
+    bad "launcher sets elevateprivileges: the sealed netdev's socat would be killed"
+  else
+    ok "no elevateprivileges (guestfwd's child calls setsid)"
   fi
 
   [ "$fail" -eq 0 ] || exit 1
