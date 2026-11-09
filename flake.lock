@@ -109,16 +109,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1794077747,
-        "narHash": "sha256-mC2ZrZSmGXgFZtqt8YcxhKMHKN6DgzTRgykEHePcYgg=",
+        "lastModified": 1794265837,
+        "narHash": "sha256-YS6iJ+Ms/GfxLnsBUZpjNVUVWoD9YSj3Aw4WIiuQido=",
         "owner": "nix-gizmos",
         "repo": "microvm-policy",
-        "rev": "9c49a0ccee1102c9e07e6fb90daff4b654726125",
+        "rev": "55e126c1d1063100f88c405030566f30b1b01b9f",
         "type": "github"
       },
       "original": {
         "owner": "nix-gizmos",
-        "ref": "v0.6.1",
+        "ref": "v0.6.2",
         "repo": "microvm-policy",
         "type": "github"
       }
