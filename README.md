@@ -708,7 +708,8 @@ A few things worth knowing before pointing this at code you don't trust:
   cannot undo), at the workspace root and in every git repository up to two
   directories below it, since a `WORK_DIR` is often a directory of checkouts
   (`microvmPolicy.workspaceGuard.repoDepth`, overridable through
-  `lib.mkNixosConfig`). Opt-in for now because denial breaks a workflow this project
+  `lib.mkNixosConfig`). The search skips `node_modules`, `vendor` and
+  `.direnv`: a repository inside one, or named so, is not covered. Opt-in for now because denial breaks a workflow this project
   itself uses — asking the agent to write a project skill or register an MCP
   server. It cannot protect a file that does not exist yet; the session
   contract states the guard's state either way.

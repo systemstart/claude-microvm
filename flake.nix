@@ -87,7 +87,7 @@
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { } }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { }, guardRepoDepth ? 0 }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -1490,7 +1490,9 @@ EOF
         fi
         if [ "''${WORKSPACE_GUARD:-}" = "1" ]; then
           _row workspace ok "guard on — host-executed config is read-only in the guest"
-          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc — in repos up to 2 levels down too"
+          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc${
+            if guardRepoDepth == 0 then " — at the workspace root only"
+            else " — in repos up to ${toString guardRepoDepth} level${lib.optionalString (guardRepoDepth > 1) "s"} down too"}"
         else
           _row workspace warn "guard off — the guest may write host-executed config"
           _hint "WORKSPACE_GUARD=1 makes .git/hooks, .mcp.json, .envrc, … read-only"
@@ -1874,6 +1876,8 @@ EOF
           storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
           defaultStoreSize = nixosCfg.claude-vm.store.size;
           shares = nixosCfg.claude-vm.shares;
+          # The session contract states what the guest guard covers.
+          guardRepoDepth = nixosCfg.microvmPolicy.workspaceGuard.repoDepth;
           # The session allowlist is assembled from these at launch, each line
           # tagged with its label so the session contract can show its source.
           egressAllowlistSources =
