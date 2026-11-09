@@ -5,7 +5,7 @@ export AGENTS_ARGS
 
 WORK_DIR ?= $(shell pwd)
 
-.PHONY: claude claude.run gemini gemini.run codex codex.run pi pi.run vms stop release-tag
+.PHONY: claude claude.run gemini gemini.run codex codex.run pi pi.run vms stop release-tag flake-diff
 
 claude:
 	nix build $(NIX_FLAGS) .#claude
@@ -74,3 +74,15 @@ release-tag:
 	{ echo "Release v$$VERSION"; echo; cat "$$BODY"; } \
 	  | git tag -s "v$$VERSION" --cleanup=verbatim -F -; \
 	git push origin "v$$VERSION"
+
+# What a flake.lock change does to the four runners, from evaluation, before
+# building anything (github.com/nix-gizmos/flake-diff-action; CI posts the
+# same report on flake.lock PRs). Every package that moves is listed.
+#   make flake-diff                     working tree's flake.lock vs HEAD's
+#   make flake-diff BASE=origin/main    on a Renovate branch
+#   make flake-diff BUILD=1             also build both sides, diff runtime closures
+# Keep the version in step with the action's pin in .github/workflows/flake-diff.yml.
+FLAKE_DIFF ?= github:nix-gizmos/flake-diff-action/v0.1.0
+flake-diff:
+	nix run $(FLAKE_DIFF) -- --impure \
+	  $(if $(BASE),--base $(BASE)) $(if $(filter 1,$(BUILD)),--build) claude gemini codex pi
