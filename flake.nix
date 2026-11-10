@@ -2021,6 +2021,10 @@ EOF
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
         };
+        registry-mirrors = import ./tests/registry-mirrors.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
         # The proxy's own tests (Go units, egress-report, egress-integration)
         # run in microvm-policy's CI. This one stays: it tests the launcher's
         # config generation against the proxy it actually ships with.
