@@ -587,7 +587,31 @@
         # virtiofsd removes neither its socket nor its `<socket>.pid` when
         # stopped with SIGTERM, which is what `systemctl stop` sends; both are
         # in the instance dir, which goes last, after every daemon has stopped.
+        # A VM stopped from outside (microvm-stop, make stop, VM_TIMEOUT, a
+        # stopped slice) ends without the agent's TUI switching off what it
+        # switched on: mouse tracking, focus events, bracketed paste, the
+        # kitty keyboard protocol, a hidden cursor. The host terminal then
+        # types mouse reports into the shell ("35;63;49M": command not found)
+        # until `reset`. Switched off right after QEMU, and again in cleanup,
+        # which is all a signal reaches. After a normal exit they are off
+        # already and this changes nothing; after SIGHUP the terminal may be
+        # gone, which is fine too.
+        _term_reset() {
+          if [ -t 1 ]; then
+            printf '\e[?1000l\e[?1002l\e[?1003l\e[?1005l\e[?1006l\e[?1015l\e[?1004l\e[?2004l\e[=0;1u\e[?25h\e[0m' 2>/dev/null || true
+          fi
+        }
         cleanup() {
+          # On a signal, bash runs this at once, while QEMU may still be
+          # ending (a stopped slice signals it too): wait, briefly, until it
+          # lets go of the instance lock it inherited, as the VM_TIMEOUT
+          # watcher does, so the reset comes after its last output. After
+          # QEMU has returned, the lock is free at once.
+          if [ -n "''${_INSTANCE_LOCK_FD:-}" ]; then
+            exec {_INSTANCE_LOCK_FD}>&-
+            ${pkgs.util-linux}/bin/flock -w 10 "$INSTANCE_DIR/lock" true 2>/dev/null || true
+          fi
+          _term_reset
           ${pkgs.systemd}/bin/systemctl --user stop "$UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$AGENT_UNIT" 2>/dev/null || true
           ${pkgs.systemd}/bin/systemctl --user stop "$GUEST_UNIT" 2>/dev/null || true
@@ -1686,16 +1710,7 @@ EOF
         # Run QEMU with corrected paths
         _VM_RC=0
         bash <(${pkgs.gnused}/bin/sed "''${_SED_ARGS[@]}" ${runner}/bin/microvm-run) || _VM_RC=$?
-        # A VM stopped from outside (microvm-stop, make stop, VM_TIMEOUT) ends
-        # without the agent's TUI switching off what it switched on: mouse
-        # tracking, focus events, bracketed paste, the kitty keyboard
-        # protocol, a hidden cursor. The host terminal then types mouse
-        # reports into the shell ("35;63;49M": command not found) until
-        # `reset`. Switch them off on the way out; after a normal exit they
-        # are off already and this changes nothing.
-        if [ -t 1 ]; then
-          printf '\e[?1000l\e[?1002l\e[?1003l\e[?1005l\e[?1006l\e[?1015l\e[?1004l\e[?2004l\e[=0;1u\e[?25h\e[0m'
-        fi
+        _term_reset
         if [ -n "$_TIMEOUT_PID" ]; then
           kill "$_TIMEOUT_PID" 2>/dev/null || true
           # 124, as timeout(1) exits, so a caller can tell a run cut short
