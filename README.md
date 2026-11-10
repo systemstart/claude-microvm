@@ -709,7 +709,12 @@ A few things worth knowing before pointing this at code you don't trust:
   directories below it, since a `WORK_DIR` is often a directory of checkouts
   (`microvmPolicy.workspaceGuard.repoDepth`, overridable through
   `lib.mkNixosConfig`). The search skips `node_modules`, `vendor` and
-  `.direnv`: a repository inside one, or named so, is not covered. Opt-in for now because denial breaks a workflow this project
+  `.direnv`: a repository inside one, or named so, is not covered.
+  Submodules and linked worktrees are covered with their repository: a
+  submodule's git dir (`.git/modules/…`, also a linked worktree's), each
+  worktree's `config.worktree`, and, when the `WORK_DIR` (or a checkout in
+  it) is a linked worktree or submodule whose git dir lies inside the
+  workspace, that git dir and its repository's. Opt-in for now because denial breaks a workflow this project
   itself uses — asking the agent to write a project skill or register an MCP
   server. It cannot protect a file that does not exist yet; the session
   contract states the guard's state either way.
