@@ -35,7 +35,7 @@
     # egress-report, and the generic allowlist. This flake keeps only the
     # consumer glue — the launcher and the agent-specific allowlists.
     microvm-policy = {
-      url = "github:nix-gizmos/microvm-policy/v0.6.1";
+      url = "github:nix-gizmos/microvm-policy/v0.6.3";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -87,7 +87,7 @@
         text = builtins.readFile ./scripts/microvm-stop.sh;
       };
 
-      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { } }:
+      mkRunnerScript = { pkgs, runner, dataDirName, apiKeyVars, agentName, settingsFile, defaultMem, defaultVcpu, defaultCriSize, storeDiskBacked, defaultStoreSize, egressReport, egressAllowlistSources, egressProxy, flavorEndpoints, shares ? { }, guardRepoDepth }:
         let
           virtiofsd = pkgs.virtiofsd;
           hostname = "${agentName}-vm";
@@ -1343,6 +1343,14 @@ EOF
           # which would land in whatever directory the launcher runs from, and
           # two launches from one directory would take it from each other.
           -e "s|-qmp unix:${hostname}.sock,|-qmp unix:$QMP_SOCK,|g"
+          # Tighter seccomp than microvm.nix's plain `-sandbox on`: no obsolete
+          # syscalls, no affinity or scheduler changes. spawn stays allowed:
+          # the sealed netdev's guestfwd forks socat per guest connection.
+          # elevateprivileges stays allowed too: its set covers setsid, which
+          # libslirp's child calls before exec, and the filter is inherited —
+          # socat would be killed and every proxied connection reset (=deny
+          # and =children alike). tests/host-surface.nix pins both.
+          -e "s|-sandbox on |-sandbox on,obsolete=deny,resourcecontrol=deny |"
           # CRI storage volume image: microvm.nix emits the relative path
           # "cri-storage.img" in both the createVolumesScript and the QEMU
           # -drive; point both at the persistent image in agent home.
@@ -1485,7 +1493,9 @@ EOF
         fi
         if [ "''${WORKSPACE_GUARD:-}" = "1" ]; then
           _row workspace ok "guard on — host-executed config is read-only in the guest"
-          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc"
+          _hint ".git/hooks, .git/config, .mcp.json, .claude/{commands,agents}, .envrc${
+            if guardRepoDepth == 0 then " — at the workspace root only"
+            else " — in repos up to ${toString guardRepoDepth} level${lib.optionalString (guardRepoDepth > 1) "s"} down too"}"
         else
           _row workspace warn "guard off — the guest may write host-executed config"
           _hint "WORKSPACE_GUARD=1 makes .git/hooks, .mcp.json, .envrc, … read-only"
@@ -1821,6 +1831,10 @@ EOF
           microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
         })
         { claude-vm.cri.enable = true; }
+        # A WORK_DIR is often a directory of checkouts, not one repo, and every
+        # one of them has a .git/config the host runs git against: with
+        # WORKSPACE_GUARD=1 the binds cover repositories two levels down too.
+        { microvmPolicy.workspaceGuard.repoDepth = lib.mkDefault 2; }
       ];
 
       flavorOf = flavor:
@@ -1865,6 +1879,8 @@ EOF
           storeDiskBacked = nixosCfg.claude-vm.store.diskBacked;
           defaultStoreSize = nixosCfg.claude-vm.store.size;
           shares = nixosCfg.claude-vm.shares;
+          # The session contract states what the guest guard covers.
+          guardRepoDepth = nixosCfg.microvmPolicy.workspaceGuard.repoDepth;
           # The session allowlist is assembled from these at launch, each line
           # tagged with its label so the session contract can show its source.
           egressAllowlistSources =
@@ -2016,6 +2032,12 @@ EOF
         settings-seed = import ./tests/settings-seed.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
+        };
+        host-surface = import ./tests/host-surface.nix {
+          inherit pkgs lib;
+          runners = builtins.mapAttrs (name: flavor:
+            self.nixosConfigurations."${name}${flavor.suffix}-${system}".config.microvm.runner.qemu) vmFlavors;
+          launcher = self.packages.${system}.claude;
         };
         work-cache = import ./tests/work-cache.nix {
           inherit pkgs lib;
