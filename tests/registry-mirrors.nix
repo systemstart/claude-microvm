@@ -1,5 +1,7 @@
-# Test for REGISTRY_MIRRORS in the guest, in its two places:
+# Test for REGISTRY_MIRRORS, in its three places:
 #
+#   - the launcher (flake.nix) refuses a malformed value before it touches the
+#     host;
 #   - scripts/registry-mirrors.sh, run here against a scratch root exactly as
 #     cri-registry-mirrors runs it against / at boot, writes each runtime's
 #     config — and nothing when unset, when sealed, or for an entry that would
@@ -7,7 +9,7 @@
 #   - the evaluated guest wires it up: the service runs before every daemon,
 #     dockerd takes the mirror flag, and both containerd instances read the
 #     hosts directory.
-{ pkgs, lib, config }:
+{ pkgs, lib, runner, config }:
 
 let
   envGet = pkgs.writeShellApplication {
@@ -67,6 +69,41 @@ pkgs.runCommand "registry-mirrors" { } ''
   '') (lib.filter (c: c.ok) structural)}
   ${lib.concatMapStrings (c: ''bad ${lib.escapeShellArg c.name}
   '') failed}
+
+  # --- the launcher ---------------------------------------------------------
+  script=${runner}/bin/microvm-run
+  mkdir -p "$TMPDIR/w"
+  for v in 'docker.io' 'docker.io=10.0.2.2:5101' 'docker.io=ftp://h' \
+           'docker.io=http://h/path' '../etc=http://h' 'docker.io=http://h,,ghcr.io=http://h'; do
+    if REGISTRY_MIRRORS="$v" WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err; then
+      bad "REGISTRY_MIRRORS='$v' was accepted"
+    elif grep -q "REGISTRY_MIRRORS entries must be" launch.err; then
+      ok "the launcher refuses REGISTRY_MIRRORS='$v'"
+    else
+      bad "REGISTRY_MIRRORS='$v' failed, but not with the validation message:"; cat launch.err >&2
+    fi
+  done
+  if REGISTRY_MIRRORS='docker.io=http://h,ghcr.io=http://g,docker.io=http://g' WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err; then
+    bad "a registry listed twice was accepted"
+  elif grep -q "REGISTRY_MIRRORS lists docker.io more than once" launch.err; then
+    ok "the launcher refuses a registry listed twice"
+  else
+    bad "a registry listed twice failed, but not with the duplicate message:"; cat launch.err >&2
+  fi
+  # A good value gets past validation; the launch then fails for want of a
+  # host, which is not what is under test.
+  REGISTRY_MIRRORS='docker.io=http://10.0.2.2:5101,localhost:5000=https://m.example:8443/' \
+    WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err || true
+  if grep -q "REGISTRY_MIRRORS" launch.err; then
+    bad "a valid REGISTRY_MIRRORS was refused:"; cat launch.err >&2
+  else
+    ok "the launcher accepts a valid REGISTRY_MIRRORS"
+  fi
+  if [ "$(grep -c 'REGISTRY_MIRRORS=%q' "$script")" -eq 1 ]; then
+    ok "the launcher hands REGISTRY_MIRRORS to the guest, %q-quoted"
+  else
+    bad "REGISTRY_MIRRORS is not written to the env file exactly once"
+  fi
 
   # --- the boot script --------------------------------------------------------
   # An env line as the launcher writes it: printf %q, which escapes the commas.

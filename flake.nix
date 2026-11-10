@@ -461,6 +461,32 @@
             echo "error: WORK_CACHE must be auto, always, never or metadata (got '$WORK_CACHE')" >&2
             exit 1 ;;
         esac
+        # Registry mirrors for the container runtimes, as
+        # <registry>=http[s]://<host>[:<port>],... — see README "Registry
+        # mirrors". Checked whole here, before anything touches the host; the
+        # guest checks each entry again, since the env file is guest-writable.
+        REGISTRY_MIRRORS="''${REGISTRY_MIRRORS:-}"
+        if [ -n "$REGISTRY_MIRRORS" ]; then
+          IFS=',' read -ra _MIRRORS <<< "$REGISTRY_MIRRORS"
+          _MIRROR_SEEN=","
+          for _m in "''${_MIRRORS[@]}"; do
+            if ! [[ "$_m" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?=https?://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/?$ ]]; then
+              echo "error: REGISTRY_MIRRORS entries must be <registry>=http[s]://<host>[:<port>] (got '$_m')" >&2
+              exit 1
+            fi
+            # One mirror per registry: the runtimes would not agree on which of
+            # two to use.
+            if [[ "$_MIRROR_SEEN" == *",''${_m%%=*},"* ]]; then
+              echo "error: REGISTRY_MIRRORS lists ''${_m%%=*} more than once" >&2
+              exit 1
+            fi
+            _MIRROR_SEEN="$_MIRROR_SEEN''${_m%%=*},"
+          done
+          case "$EGRESS_POLICY" in
+            shadow|enforce)
+              echo "warning: REGISTRY_MIRRORS is ignored under EGRESS_POLICY=$EGRESS_POLICY — the seal blocks direct connections, so pulls go through the egress proxy" >&2 ;;
+          esac
+        fi
         EGRESS_DIR=""
         EGRESS_PCAP=""
         EGRESS_UNIT=""
@@ -1060,6 +1086,9 @@ EOF
         # owner-only. In the guest it shows as the agent's, still 0600.
         chmod 600 "$INSTANCE_ENV"
         echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$INSTANCE_ENV"
+        # Read by cri-registry-mirrors (modules/cri.nix) before any container
+        # daemon starts.
+        printf 'REGISTRY_MIRRORS=%q\n' "$REGISTRY_MIRRORS" >> "$INSTANCE_ENV"
         # %q produces a single-quoted/escaped form that survives `source`
         # so values like AGENTS_ARGS='-p "hi there"' round-trip intact.
         printf 'AGENTS_ARGS=%q\n' "''${AGENTS_ARGS:-}" >> "$INSTANCE_ENV"
@@ -1552,6 +1581,12 @@ EOF
         else
           _row containers "" "off"
         fi
+        if [ -n "$REGISTRY_MIRRORS" ]; then
+          case "$EGRESS_POLICY" in
+            shadow|enforce) _cont "registry mirrors: ignored under the seal" ;;
+            *)              _cont "registry mirrors: ''${REGISTRY_MIRRORS//,/, }" ;;
+          esac
+        fi
         _row resources "" "''${VM_MEM} MiB RAM · $VM_VCPU vCPUs${lib.optionalString storeDiskBacked " · writable store \${VM_STORE_SIZE} MiB, fresh each boot"}"
         if [ "$_TIMEOUT_S" -gt 0 ]; then
           _cont "wall-clock limit $VM_TIMEOUT: then the power button, and quit $VM_TIMEOUT_GRACE later"
@@ -2023,6 +2058,7 @@ EOF
         };
         registry-mirrors = import ./tests/registry-mirrors.nix {
           inherit pkgs lib;
+          runner = self.packages.${system}.claude;
           config = self.nixosConfigurations."claude-${system}".config;
         };
         # The proxy's own tests (Go units, egress-report, egress-integration)
