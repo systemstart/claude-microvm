@@ -466,6 +466,30 @@
         # mirrors". Checked whole here, before anything touches the host; the
         # guest checks each entry again, since the env file is guest-writable.
         REGISTRY_MIRRORS="''${REGISTRY_MIRRORS:-}"
+        # EXTRA_ENV is written to the env file after REGISTRY_MIRRORS, so an
+        # entry there wins. Resolve it now, so the value validated, warned
+        # about, shown in the session contract and written for the guest is
+        # one and the same. (A bare name forwards the host variable, which is
+        # what REGISTRY_MIRRORS already holds.)
+        if [ -n "''${EXTRA_ENV:-}" ]; then
+          _OLD_IFS="$IFS"
+          IFS=','
+          read -r -a _EM_ENTRIES <<< "$EXTRA_ENV"
+          IFS="$_OLD_IFS"
+          for _em in ''${_EM_ENTRIES+"''${_EM_ENTRIES[@]}"}; do
+            read -r _em <<< "$_em" || true
+            case "$_em" in
+              REGISTRY_MIRRORS=*) REGISTRY_MIRRORS="''${_em#*=}" ;;
+            esac
+          done
+        fi
+        # `read` below takes one line, so a newline would hide everything
+        # after it from the checks.
+        case "$REGISTRY_MIRRORS" in
+          *$'\n'*)
+            echo "error: REGISTRY_MIRRORS must not contain a newline" >&2
+            exit 1 ;;
+        esac
         if [ -n "$REGISTRY_MIRRORS" ]; then
           IFS=',' read -ra _MIRRORS <<< "$REGISTRY_MIRRORS"
           _MIRROR_SEEN=","
@@ -1145,6 +1169,8 @@ EOF
             # Split on the first '=' — everything after it is the value, so
             # values may contain '=' themselves.
             _name="''${_entry%%=*}"
+            # Resolved and written above, with the rest of REGISTRY_MIRRORS.
+            [ "$_name" = REGISTRY_MIRRORS ] && continue
             if ! [[ "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
               echo "warning: EXTRA_ENV: invalid variable name '$_name', skipping"
               continue

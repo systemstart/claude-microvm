@@ -90,6 +90,31 @@ pkgs.runCommand "registry-mirrors" { } ''
   else
     bad "a registry listed twice failed, but not with the duplicate message:"; cat launch.err >&2
   fi
+  # A newline would hide everything after it from the per-entry checks.
+  if REGISTRY_MIRRORS=$'docker.io=http://h\nevil' WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err; then
+    bad "a REGISTRY_MIRRORS with a newline was accepted"
+  elif grep -q "REGISTRY_MIRRORS must not contain a newline" launch.err; then
+    ok "the launcher refuses a newline in REGISTRY_MIRRORS"
+  else
+    bad "a newline in REGISTRY_MIRRORS failed, but not with its message:"; cat launch.err >&2
+  fi
+  # EXTRA_ENV overrides REGISTRY_MIRRORS in the env file, so it is the value
+  # that must be validated.
+  if REGISTRY_MIRRORS='docker.io=http://h' EXTRA_ENV='REGISTRY_MIRRORS=bogus' WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err; then
+    bad "a bad REGISTRY_MIRRORS in EXTRA_ENV was accepted"
+  elif grep -q "REGISTRY_MIRRORS entries must be.*bogus" launch.err; then
+    ok "the launcher validates a REGISTRY_MIRRORS set through EXTRA_ENV"
+  else
+    bad "a bad EXTRA_ENV REGISTRY_MIRRORS failed, but not with the validation message:"; cat launch.err >&2
+  fi
+  # ...and a good one replaces a bad one, rather than the bad one failing.
+  REGISTRY_MIRRORS='bogus' EXTRA_ENV='REGISTRY_MIRRORS=docker.io=http://h' \
+    WORK_DIR=$TMPDIR/w "$script" >/dev/null 2>launch.err || true
+  if grep -q "REGISTRY_MIRRORS" launch.err; then
+    bad "a good EXTRA_ENV REGISTRY_MIRRORS was refused:"; cat launch.err >&2
+  else
+    ok "the EXTRA_ENV value of REGISTRY_MIRRORS is the one validated"
+  fi
   # A good value gets past validation; the launch then fails for want of a
   # host, which is not what is under test.
   REGISTRY_MIRRORS='docker.io=http://10.0.2.2:5101,localhost:5000=https://m.example:8443/' \
