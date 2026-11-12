@@ -461,6 +461,56 @@
             echo "error: WORK_CACHE must be auto, always, never or metadata (got '$WORK_CACHE')" >&2
             exit 1 ;;
         esac
+        # Registry mirrors for the container runtimes, as
+        # <registry>=http[s]://<host>[:<port>],... — see README "Registry
+        # mirrors". Checked whole here, before anything touches the host; the
+        # guest checks each entry again, since the env file is guest-writable.
+        REGISTRY_MIRRORS="''${REGISTRY_MIRRORS:-}"
+        # EXTRA_ENV is written to the env file after REGISTRY_MIRRORS, so an
+        # entry there wins. Resolve it now, so the value validated, warned
+        # about, shown in the session contract and written for the guest is
+        # one and the same. (A bare name forwards the host variable, which is
+        # what REGISTRY_MIRRORS already holds.)
+        if [ -n "''${EXTRA_ENV:-}" ]; then
+          _OLD_IFS="$IFS"
+          IFS=','
+          read -r -a _EM_ENTRIES <<< "$EXTRA_ENV"
+          IFS="$_OLD_IFS"
+          for _em in ''${_EM_ENTRIES+"''${_EM_ENTRIES[@]}"}; do
+            read -r _em <<< "$_em" || true
+            case "$_em" in
+              REGISTRY_MIRRORS=*) REGISTRY_MIRRORS="''${_em#*=}" ;;
+            esac
+          done
+        fi
+        # `read` below takes one line, so a newline would hide everything
+        # after it from the checks.
+        case "$REGISTRY_MIRRORS" in
+          *$'\n'*)
+            echo "error: REGISTRY_MIRRORS must not contain a newline" >&2
+            exit 1 ;;
+        esac
+        if [ -n "$REGISTRY_MIRRORS" ]; then
+          IFS=',' read -ra _MIRRORS <<< "$REGISTRY_MIRRORS"
+          _MIRROR_SEEN=","
+          for _m in "''${_MIRRORS[@]}"; do
+            if ! [[ "$_m" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?=https?://[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/?$ ]]; then
+              echo "error: REGISTRY_MIRRORS entries must be <registry>=http[s]://<host>[:<port>] (got '$_m')" >&2
+              exit 1
+            fi
+            # One mirror per registry: the runtimes would not agree on which of
+            # two to use.
+            if [[ "$_MIRROR_SEEN" == *",''${_m%%=*},"* ]]; then
+              echo "error: REGISTRY_MIRRORS lists ''${_m%%=*} more than once" >&2
+              exit 1
+            fi
+            _MIRROR_SEEN="$_MIRROR_SEEN''${_m%%=*},"
+          done
+          case "$EGRESS_POLICY" in
+            shadow|enforce)
+              echo "warning: REGISTRY_MIRRORS is ignored under EGRESS_POLICY=$EGRESS_POLICY — the seal blocks direct connections, so pulls go through the egress proxy" >&2 ;;
+          esac
+        fi
         EGRESS_DIR=""
         EGRESS_PCAP=""
         EGRESS_UNIT=""
@@ -1084,6 +1134,9 @@ EOF
         # owner-only. In the guest it shows as the agent's, still 0600.
         chmod 600 "$INSTANCE_ENV"
         echo "ENABLE_CRI=''${ENABLE_CRI:-}" >> "$INSTANCE_ENV"
+        # Read by cri-registry-mirrors (modules/cri.nix) before any container
+        # daemon starts.
+        printf 'REGISTRY_MIRRORS=%q\n' "$REGISTRY_MIRRORS" >> "$INSTANCE_ENV"
         # %q produces a single-quoted/escaped form that survives `source`
         # so values like AGENTS_ARGS='-p "hi there"' round-trip intact.
         printf 'AGENTS_ARGS=%q\n' "''${AGENTS_ARGS:-}" >> "$INSTANCE_ENV"
@@ -1140,6 +1193,8 @@ EOF
             # Split on the first '=' — everything after it is the value, so
             # values may contain '=' themselves.
             _name="''${_entry%%=*}"
+            # Resolved and written above, with the rest of REGISTRY_MIRRORS.
+            [ "$_name" = REGISTRY_MIRRORS ] && continue
             if ! [[ "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
               echo "warning: EXTRA_ENV: invalid variable name '$_name', skipping"
               continue
@@ -1585,6 +1640,12 @@ EOF
           fi
         else
           _row containers "" "off"
+        fi
+        if [ -n "$REGISTRY_MIRRORS" ]; then
+          case "$EGRESS_POLICY" in
+            shadow|enforce) _cont "registry mirrors: ignored under the seal" ;;
+            *)              _cont "registry mirrors: ''${REGISTRY_MIRRORS//,/, }" ;;
+          esac
         fi
         _row resources "" "''${VM_MEM} MiB RAM · $VM_VCPU vCPUs${lib.optionalString storeDiskBacked " · writable store \${VM_STORE_SIZE} MiB, fresh each boot"}"
         if [ "$_TIMEOUT_S" -gt 0 ]; then
@@ -2067,6 +2128,11 @@ EOF
         work-cache = import ./tests/work-cache.nix {
           inherit pkgs lib;
           runner = self.packages.${system}.claude;
+        };
+        registry-mirrors = import ./tests/registry-mirrors.nix {
+          inherit pkgs lib;
+          runner = self.packages.${system}.claude;
+          config = self.nixosConfigurations."claude-${system}".config;
         };
         # The proxy's own tests (Go units, egress-report, egress-integration)
         # run in microvm-policy's CI. This one stays: it tests the launcher's

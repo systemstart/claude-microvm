@@ -10,6 +10,12 @@ let
     text = builtins.readFile ../scripts/microvm-env-get.sh;
   };
   envGet = "${microvmEnvGet}/bin/microvm-env-get";
+
+  registryMirrors = pkgs.writeShellApplication {
+    name = "registry-mirrors";
+    runtimeInputs = with pkgs; [ coreutils microvmEnvGet ];
+    text = builtins.readFile ../scripts/registry-mirrors.sh;
+  };
 in
 {
   options.claude-vm.cri = {
@@ -167,6 +173,11 @@ CRIEOF
         [plugins."io.containerd.cri.v1.images"]
           sandbox_image = "registry.k8s.io/pause:3.10"
 
+        # Per-registry hosts.toml, written at boot by cri-registry-mirrors when
+        # REGISTRY_MIRRORS is set; an empty or missing directory changes nothing.
+        [plugins."io.containerd.cri.v1.images".registry]
+          config_path = "/etc/containerd/certs.d"
+
         [plugins."io.containerd.cri.v1.runtime"]
           snapshotter = "overlayfs"
           [plugins."io.containerd.cri.v1.runtime".cni]
@@ -192,6 +203,11 @@ CRIEOF
 
         [plugins."io.containerd.cri.v1.images"]
           sandbox_image = "registry.k8s.io/pause:3.10"
+
+        # Per-registry hosts.toml, written at boot by cri-registry-mirrors when
+        # REGISTRY_MIRRORS is set; an empty or missing directory changes nothing.
+        [plugins."io.containerd.cri.v1.images".registry]
+          config_path = "/etc/containerd/certs.d"
 
         [plugins."io.containerd.cri.v1.runtime"]
           snapshotter = "overlayfs"
@@ -371,9 +387,28 @@ CRIEOF
       '';
     };
 
+    # Registry mirrors (REGISTRY_MIRRORS), e.g. pull-through caches on the
+    # host. Like cri-proxy-env, the daemons are systemd services that never see
+    # the agent's environment, so the launcher's setting is turned into each
+    # runtime's own config here, before any of them starts. Unset, it writes
+    # nothing; under a sealed netdev it writes nothing either, since the seal
+    # blocks the mirrors and the proxy already governs pulls. The work is in
+    # scripts/registry-mirrors.sh, which tests/registry-mirrors.nix runs.
+    systemd.services.cri-registry-mirrors = {
+      description = "Registry mirrors for the container runtimes";
+      after = [ instance.mountUnit ];
+      before = [ "cri-activate.service" "containerd.service" "containerd-crun.service" "crio.service" "docker.service" "podman.service" ];
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${registryMirrors}/bin/registry-mirrors ${instance.dir}/env /";
+      };
+    };
+
     systemd.services.cri-activate = {
       description = "Activate CRI runtimes based on ENABLE_CRI";
-      after = [ "network.target" instance.mountUnit "var-lib-containers.mount" "cri-proxy-env.service" ];
+      after = [ "network.target" instance.mountUnit "var-lib-containers.mount" "cri-proxy-env.service" "cri-registry-mirrors.service" ];
       before = [ "getty@tty1.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
@@ -463,8 +498,11 @@ CRIEOF
       wants = [ "network.target" ];
       wantedBy = [ ];
       serviceConfig = {
-        ExecStart = "${pkgs.docker}/bin/dockerd --config-file /etc/docker/daemon.json";
-        EnvironmentFile = "-/run/cri-proxy.env";
+        # $DOCKERD_MIRROR_ARGS is unbraced on purpose: systemd splits it into
+        # words, so unset or empty it adds no argument at all. Docker Hub is
+        # the only registry dockerd can mirror; see cri-registry-mirrors.
+        ExecStart = "${pkgs.docker}/bin/dockerd --config-file /etc/docker/daemon.json $DOCKERD_MIRROR_ARGS";
+        EnvironmentFile = [ "-/run/cri-proxy.env" "-/run/cri-registry-mirrors.env" ];
         Restart = "always";
         RestartSec = 5;
         Delegate = true;
