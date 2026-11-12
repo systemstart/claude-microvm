@@ -4,8 +4,9 @@
 # The seed blocks append to ~/.claude/CLAUDE.md, which lives on a host share and
 # outlives the VM, so each block is guarded by a `grep -q '<!-- MARKER -->'`.
 # That guard is idempotent across boots but was not atomic within one: the guest
-# opens two logins at once (console and tty1), and on the first boot after a new
-# block is introduced both shells passed the check before either appended,
+# opened two logins at once (console and tty1, until tests/single-console.nix),
+# and on the first boot after a new block is introduced both shells passed the
+# check before either appended,
 # seeding it twice. Nothing failed loudly — the agent just carried a duplicated
 # copy of its own instructions in every context window.
 #

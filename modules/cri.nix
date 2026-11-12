@@ -409,7 +409,10 @@ CRIEOF
     systemd.services.cri-activate = {
       description = "Activate CRI runtimes based on ENABLE_CRI";
       after = [ "network.target" instance.mountUnit "var-lib-containers.mount" "cri-proxy-env.service" "cri-registry-mirrors.service" ];
-      before = [ "getty@tty1.service" ];
+      # Before any login, whatever its terminal, so the agent never finds the
+      # runtimes it asked for still starting. (getty@tty1, named here before,
+      # is masked, and was never the agent's console.)
+      before = [ "systemd-user-sessions.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";

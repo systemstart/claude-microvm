@@ -31,7 +31,7 @@ let
   };
 in
 {
-  imports = [ ./hardening.nix ];
+  imports = [ ./hardening.nix ./console.nix ];
 
   options.claude-vm.agent = {
     name = lib.mkOption {
@@ -327,11 +327,6 @@ in
       shell = pkgs.bash;
     };
 
-    boot.kernelParams = [ "console=hvc0" ];
-
-    services.getty.autologinUser = "agent";
-    systemd.services."getty@tty1".enable = false;
-
     # /etc/systemd/system-shutdown is a symlink into the store, and the store's
     # lower layer is the 9p share, which is torn down before systemd-shutdown
     # runs its shutdown hooks. The chase then fails against a still-mounted
@@ -434,10 +429,11 @@ in
 
       # The seed blocks here and in the agent's own shellInit append to a file
       # on a host share that outlives the VM, so the marker check is what keeps
-      # them idempotent across boots. It is not enough *within* a boot: the
-      # console and tty1 logins start their shells at the same instant, and on
-      # the first boot after a new block is introduced both pass the check
-      # before either appends, seeding it twice. Serialise the whole region.
+      # them idempotent across boots. It is not enough *within* a boot: two
+      # shells starting at the same instant — as the console and tty1 logins
+      # did before modules/console.nix — both pass the check on the first boot
+      # after a new block is introduced, before either appends, seeding it
+      # twice. Serialise the whole region.
       exec 9>"''${XDG_RUNTIME_DIR:-/tmp}/claude-vm-seed.lock" 2>/dev/null && flock 9
 
       # ENFILE on a share is an obscure failure with a non-obvious recovery, and
@@ -496,7 +492,7 @@ SHAREEOF
       # file — one the agent opens itself, or `bash -l` typed at the console —
       # and would otherwise start a second agent and power the VM off when it
       # ended. MICROVM_AGENT, exported, marks every shell below the agent.
-      if [ "$(tty 2>/dev/null)" = /dev/hvc0 ] && shopt -q login_shell && [ -z "''${MICROVM_AGENT:-}" ]; then
+      if [ "$(tty 2>/dev/null)" = /dev/${config.claude-vm.console} ] && shopt -q login_shell && [ -z "''${MICROVM_AGENT:-}" ]; then
         export MICROVM_AGENT=${lib.escapeShellArg cfg.name}
         _microvm_console=1
         _microvm_refused=""
@@ -569,7 +565,11 @@ SHAREEOF
     systemd.services.microvm-ca-certs = {
       description = "Inject custom CA certificates into system trust store";
       after = [ instance.mountUnit ];
-      before = [ "getty@hvc0.service" "nix-daemon.service" ];
+      # Every login waits for systemd-user-sessions, whatever its terminal, so
+      # the agent never starts against a bundle without these. (The console's
+      # getty is serial-getty@hvc0, from the generator; getty@hvc0, named here
+      # before, never runs.)
+      before = [ "systemd-user-sessions.service" "nix-daemon.service" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         Type = "oneshot";

@@ -1916,6 +1916,7 @@ EOF
           microvmPolicy.stateFile = "${config.claude-vm.instance.dir}/env";
           microvmPolicy.stateAfter = [ config.claude-vm.instance.mountUnit ];
         })
+        ./modules/login-ordering.nix
         { claude-vm.cri.enable = true; }
         # A WORK_DIR is often a directory of checkouts, not one repo, and every
         # one of them has a .git/config the host runs git against: with
@@ -2074,6 +2075,10 @@ EOF
           inherit (self.lib) flavors mkRunner;
           package = self.packages.${system}.claude;
         };
+      } // lib.optionalAttrs (system == "x86_64-linux") {
+        # Gives its VM a second ISA UART for the console, which only x86 has.
+        single-console = import ./tests/single-console.nix { inherit pkgs; };
+      } // {
         store-overlay-disk = import ./tests/store-overlay-disk.nix {
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
@@ -2104,6 +2109,10 @@ EOF
           runner = self.packages.${system}.claude;
         };
         seed-idempotence = import ./tests/seed-idempotence.nix {
+          inherit pkgs lib;
+          config = self.nixosConfigurations."claude-${system}".config;
+        };
+        login-ordering = import ./tests/login-ordering.nix {
           inherit pkgs lib;
           config = self.nixosConfigurations."claude-${system}".config;
         };
